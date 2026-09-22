@@ -1,0 +1,5 @@
+# Secrets and machine-specific state — never commit these.
+Windows/rc-auth.txt
+Windows/rclone.conf
+Windows/config.psd1
+*.log
