@@ -37,6 +37,18 @@ All of this lives under `Windows/`.
    Remote name: `proton`, type: `protondrive`. Enter your email/password (and
    2FA / mailbox password if applicable) when prompted.
 
+   Then add one more line under the `[proton]` section it just wrote, in
+   `C:\ProgramData\rclone\rclone.conf`:
+   ```ini
+   replace_existing_draft = true
+   ```
+   Without this, an upload interrupted by a crash, a network blip, or two
+   syncs racing each other leaves an orphaned "draft" on Proton's side; the
+   *next* upload of that same file then fails with `a draft exist ...` and,
+   inside bisync, that failure is treated as unsafe and aborts the whole run
+   (forcing a `--resync`). This flag tells rclone to just replace the
+   dangling draft instead of erroring out. See **Known gotchas** below.
+
 4. **Copy and edit the config:**
    ```powershell
    Copy-Item Windows\config.example.psd1 C:\ProgramData\rclone\config.psd1
@@ -97,8 +109,17 @@ All of this lives under `Windows/`.
 
 - **rclone's Proton backend is beta** (Tier 4/experimental upstream) and
   reverse-engineered — no official API docs. It has recovered cleanly from
-  transient `401 Invalid access token` errors mid-run in testing, but keep an
-  eye on `service.log`.
+  transient `401 Invalid access token` and `429 Too many recent API requests`
+  errors mid-run in testing (via `--resilient`/`--recover`), but keep an eye
+  on `service.log`.
+- **`a draft exist` errors can abort a whole bisync run.** Seen in testing
+  when uploading a newly-created local file hit a leftover Proton upload
+  draft (e.g. from an earlier interrupted sync). `--resilient` retries a few
+  times, but if it never clears, bisync treats it as unsafe and aborts,
+  requiring a `--resync` to recover (the service does this automatically —
+  see `rclone-service.ps1`'s `Test-Path *.lst` check). Set
+  `replace_existing_draft = true` on the `[proton]` remote (step 3 above) to
+  stop this from happening in the first place.
 - **No modtime support**: Proton Drive doesn't store modification times, so
   comparisons fall back to size + SHA1 hash. This makes every full scan
   slower (rclone has to hash) but is the safest available comparison.
