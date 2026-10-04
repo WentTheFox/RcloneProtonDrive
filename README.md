@@ -10,6 +10,10 @@ and drives a periodic sync through it, so runs show up as jobs in that UI.
 
 A Linux equivalent lives in a sibling folder (see that folder's own notes).
 
+Clone with `git clone --recurse-submodules` (or run `git submodule update --init`
+afterwards): the sync status icons come from the [Lucide](https://lucide.dev)
+submodule in `third_party/lucide`.
+
 ## Windows setup
 
 All of this lives under `Windows/`.
@@ -167,3 +171,13 @@ layout change, and copy it somewhere as a backup first.
 
 `rclone-protondrive-download.service` is a one-shot initial `rclone copy` that
 disables itself once a clean pass finishes.
+
+## Credits
+
+The synced / syncing / error / idle status icons (Windows tray icon and Plasma
+widget) are [Lucide](https://lucide.dev) icons (`cloud-check`, `cloud-sync`,
+`cloud-alert`, `cloud`), © Lucide Icons and Contributors, licensed under the
+[ISC License](https://github.com/lucide-icons/lucide/blob/main/LICENSE). They are
+pulled in as the `third_party/lucide` git submodule rather than copied into this
+repo, and coloured at install time (`Windows/Build-Icons.ps1` renders PNGs for
+the tray, `Linux/install.sh` stages recoloured SVGs into the widget).

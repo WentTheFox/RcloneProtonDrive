@@ -9,6 +9,7 @@ $TaskName = 'RcloneProtonTray'
 
 Copy-Item "$Here\Watch-RcloneSync.ps1" "$Root\Watch-RcloneSync.ps1" -Force
 Copy-Item "$Here\Launch-Tray.vbs" "$Root\Launch-Tray.vbs" -Force
+& "$Here\Build-Icons.ps1" -Out "$Root\icons"
 
 $wscript = "$env:SystemRoot\System32\wscript.exe"
 $action = New-ScheduledTaskAction -Execute $wscript -Argument "`"$Root\Launch-Tray.vbs`""

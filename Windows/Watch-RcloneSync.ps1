@@ -16,22 +16,24 @@ Add-Type -AssemblyName System.Drawing
 $Root = 'C:\ProgramData\rclone'
 $LogFile = "$Root\service.log"
 
-function New-DotIcon([System.Drawing.Color]$color) {
-    $bmp = New-Object System.Drawing.Bitmap 32, 32
+# Icons are rendered from the Lucide submodule by Build-Icons.ps1 (called from Register-Tray.ps1).
+function New-PngIcon([string]$name) {
+    $src = [System.Drawing.Image]::FromFile("$Root\icons\$name.png")
+    $size = [System.Windows.Forms.SystemInformation]::SmallIconSize
+    $bmp = New-Object System.Drawing.Bitmap $size.Width, $size.Height
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.Clear([System.Drawing.Color]::Transparent)
-    $brush = New-Object System.Drawing.SolidBrush $color
-    $g.FillEllipse($brush, 2, 2, 28, 28)
-    $g.Dispose()
-    $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
-    $icon
+    $g.InterpolationMode = 'HighQualityBicubic'
+    $g.SmoothingMode = 'HighQuality'
+    $g.DrawImage($src, 0, 0, $size.Width, $size.Height)
+    $g.Dispose(); $src.Dispose()
+    [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
-$iconOk   = New-DotIcon ([System.Drawing.Color]::FromArgb(40, 180, 90))
-$iconBad  = New-DotIcon ([System.Drawing.Color]::FromArgb(210, 50, 45))
-$iconWarn = New-DotIcon ([System.Drawing.Color]::FromArgb(230, 170, 30))
-
+$iconOk      = New-PngIcon 'synced'
+$iconBad     = New-PngIcon 'error'
+$iconSyncing = New-PngIcon 'syncing'
+$iconIdle    = New-PngIcon 'idle'
 $notify = New-Object System.Windows.Forms.NotifyIcon
-$notify.Icon = $iconWarn
+$notify.Icon = $iconIdle
 $notify.Text = 'Proton Drive sync: starting up'
 $notify.Visible = $true
 
@@ -55,7 +57,7 @@ $notify.ContextMenuStrip = $menu
 $notify.Add_MouseClick({ if ($_.Button -eq 'Left') { Toggle-RcloneTrayPopup } })
 
 $global:RcloneTrayNotify = $notify
-$global:RcloneTrayIconWarn = $iconWarn
+$global:RcloneTrayIconSyncing = $iconSyncing
 $global:RcloneTrayRoot = $Root
 $global:RcloneSyncing = $false
 $global:RcloneSyncSince = $null
@@ -74,7 +76,7 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
     switch ($state) {
         'start' {
             $global:RcloneSyncSince = $when
-            $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconWarn
+            $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconSyncing
             $text = "Proton Drive sync: syncing ($stamp)"
             $global:RcloneTrayNotify.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
         }

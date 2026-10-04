@@ -55,12 +55,13 @@ PlasmoidItem {
     property bool running: false
     readonly property string effectiveState: running ? "syncing" : status.state
 
+    // Lucide icons (see README), coloured and staged into contents/icons by install.sh
     readonly property string iconName: {
         switch (effectiveState) {
-        case "syncing": return "folder-sync"
-        case "idle": return "folder-cloud"
-        case "error": return "dialog-error"
-        default: return "folder-cloud"
+        case "syncing": return Qt.resolvedUrl("../icons/syncing.svg")
+        case "idle": return Qt.resolvedUrl("../icons/synced.svg")
+        case "error": return Qt.resolvedUrl("../icons/error.svg")
+        default: return Qt.resolvedUrl("../icons/idle.svg")
         }
     }
     readonly property string stateText: {
