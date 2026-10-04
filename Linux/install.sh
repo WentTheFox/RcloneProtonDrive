@@ -26,12 +26,19 @@ trap 'rm -rf "$stage"' EXIT
 cp -r "$here/plasmoid/tf.went.rcloneprotondrive" "$stage/"
 pkg="$stage/tf.went.rcloneprotondrive"
 mkdir -p "$pkg/contents/icons"
-icon() { sed "s/currentColor/$3/" "$lucide/$1.svg" > "$pkg/contents/icons/$2.svg"; }
+# The cloud outline is the path with the big arc ("7 7 0 1"); everything else is the
+# glyph (check / arrows / !). Outline is uncoloured and masked with the Plasma text
+# colour by StatusIcon.qml; the glyph gets a fixed colour. Keep colours in sync with
+# Windows/Build-Icons.ps1.
+icon() {  # <lucide-name> <state> <glyph-colour|->
+    awk '/<path/ { if ($0 ~ /7 7 0 1/) print; next } { print }' "$lucide/$1.svg" > "$pkg/contents/icons/$2-outline.svg"
+    [[ $3 == - ]] && return
+    awk '/<path/ { if ($0 !~ /7 7 0 1/) print; next } { print }' "$lucide/$1.svg" | sed "s/currentColor/$3/" > "$pkg/contents/icons/$2-glyph.svg"
+}
 icon cloud-check synced '#2eb85c'
 icon cloud-sync syncing '#3b82f6'
 icon cloud-alert error '#e5484d'
-# Neutral icon keeps currentColor; the widget masks it with the Plasma text colour
-cp "$lucide/cloud.svg" "$pkg/contents/icons/idle.svg"
+icon cloud idle -
 
 kpackagetool6 -t Plasma/Applet -u "$pkg" 2>/dev/null \
     || kpackagetool6 -t Plasma/Applet -i "$pkg"

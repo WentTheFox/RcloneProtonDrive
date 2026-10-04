@@ -55,18 +55,16 @@ PlasmoidItem {
     property bool running: false
     readonly property string effectiveState: running ? "syncing" : status.state
 
-    // Lucide icons (see README), staged into contents/icons by install.sh. The neutral
-    // one is uncoloured and masked with the theme text colour so it reads on light and dark.
-    readonly property bool iconIsMask: ["syncing", "idle", "error"].indexOf(effectiveState) < 0
+    // Lucide icons (see README), staged into contents/icons by install.sh and drawn by
+    // StatusIcon.qml: cloud outline in the theme text colour, state-coloured glyph.
     readonly property string iconName: {
         switch (effectiveState) {
-        case "syncing": return Qt.resolvedUrl("../icons/syncing.svg")
-        case "idle": return Qt.resolvedUrl("../icons/synced.svg")
-        case "error": return Qt.resolvedUrl("../icons/error.svg")
-        default: return Qt.resolvedUrl("../icons/idle.svg")
+        case "syncing": return "syncing"
+        case "idle": return "synced"
+        case "error": return "error"
+        default: return "idle"
         }
-    }
-    readonly property string stateText: {
+    }    readonly property string stateText: {
         switch (effectiveState) {
         case "syncing": return i18n("Syncing…")
         case "idle": return i18n("Up to date")
@@ -75,7 +73,7 @@ PlasmoidItem {
         }
     }
 
-    Plasmoid.icon: iconName
+    Plasmoid.icon: "folder-cloud"
     toolTipMainText: i18n("Proton Drive")
     toolTipSubText: effectiveState === "error" && status.message ? status.message : stateText
     Plasmoid.status: effectiveState === "error" ? PlasmaCore.Types.NeedsAttentionStatus
@@ -141,11 +139,9 @@ PlasmoidItem {
 
     compactRepresentation: MouseArea {
         onClicked: root.expanded = !root.expanded
-        Kirigami.Icon {
+        StatusIcon {
             anchors.fill: parent
-            source: root.iconName
-            isMask: root.iconIsMask
-            color: Kirigami.Theme.textColor
+            name: root.iconName
         }
     }
 
@@ -156,7 +152,7 @@ PlasmoidItem {
 
         RowLayout {
             spacing: Kirigami.Units.largeSpacing
-            Kirigami.Icon { source: root.iconName; isMask: root.iconIsMask; color: Kirigami.Theme.textColor; implicitWidth: Kirigami.Units.iconSizes.large; implicitHeight: implicitWidth }
+            StatusIcon { name: root.iconName; implicitWidth: Kirigami.Units.iconSizes.large; implicitHeight: implicitWidth }
             ColumnLayout {
                 spacing: 0
                 Layout.fillWidth: true
