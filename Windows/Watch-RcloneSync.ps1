@@ -5,6 +5,22 @@
 # sync can't silently sit broken for days the way it did before this existed.
 # Run via Register-Tray.ps1 (logon scheduled task), or manually:
 #   powershell -NoProfile -WindowStyle Hidden -File Watch-RcloneSync.ps1
+# SystemEvents is a static event raised on its own thread, which PowerShell script
+# blocks can't handle directly, so a tiny C# shim marshals it onto the UI thread.
+# (Compiled before FreeConsole: Add-Type needs a console handle.)
+Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @"
+using System;
+using System.Windows.Forms;
+using Microsoft.Win32;
+public class ThemeWatcher {
+    public ThemeWatcher(Control ui, Action callback) {
+        SystemEvents.UserPreferenceChanged += (s, e) => {
+            if (e.Category == UserPreferenceCategory.General && ui.IsHandleCreated) ui.BeginInvoke(callback);
+        };
+    }
+}
+"@
+
 # Detach from the console so no PowerShell window lingers (and closing one
 # can't kill the tray icon). -WindowStyle Hidden alone still flashes a window.
 Add-Type -Namespace Win32 -Name Console -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool FreeConsole();'
@@ -53,6 +69,8 @@ $itemOpen.Add_Click({ Start-Process (Get-WebGuiUrl) })
 $itemSync = $menu.Items.Add('Sync now')
 $itemSync.Add_Click({ New-Item -ItemType File -Force "$Root\sync-now" | Out-Null })
 $menu.Items.Add('-') | Out-Null
+$itemRestart = $menu.Items.Add('Restart tray icon')
+$itemRestart.Add_Click({ Restart-RcloneTray })
 $itemExit = $menu.Items.Add('Exit')
 $itemExit.Add_Click({ $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() })
 $notify.ContextMenuStrip = $menu
@@ -348,5 +366,23 @@ $watcher = New-Object System.IO.FileSystemWatcher (Split-Path $LogFile), (Split-
 $watcher.NotifyFilter = [System.IO.NotifyFilters]'LastWrite, Size'
 Register-ObjectEvent $watcher Changed -Action { Read-RcloneTrayNewLines } | Out-Null
 $watcher.EnableRaisingEvents = $true
+
+# Theme switches: icons and popup colours are chosen at startup, so relaunch when
+# the light/dark setting changes. Event-driven (WM_SETTINGCHANGE via SystemEvents), no polling.
+function global:Get-RcloneThemeKey {
+    $p = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue
+    "$($p.SystemUsesLightTheme)/$($p.AppsUseLightTheme)"
+}
+$global:RcloneThemeKey = Get-RcloneThemeKey
+function global:Restart-RcloneTray {
+    Start-Process "$env:SystemRoot\System32\wscript.exe" -ArgumentList "`"$($global:RcloneTrayRoot)\Launch-Tray.vbs`""
+    $global:RcloneTrayNotify.Visible = $false
+    [System.Windows.Forms.Application]::Exit()
+}
+$null = $form.Handle  # make sure the popup form has a handle to marshal onto
+$global:RcloneThemeWatcher = New-Object ThemeWatcher $form, ([Action]{
+    Start-Sleep -Milliseconds 500  # let the registry write settle
+    if ((Get-RcloneThemeKey) -ne $global:RcloneThemeKey) { Restart-RcloneTray }
+})
 
 [System.Windows.Forms.Application]::Run()
