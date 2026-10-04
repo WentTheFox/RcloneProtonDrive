@@ -15,6 +15,26 @@ PlasmoidItem {
     readonly property string waitScript: Qt.resolvedUrl("../scripts/wait-for-change").toString().replace("file://", "")
     readonly property string unit: "rclone-protondrive-sync.service"
     readonly property string queryCmd: "sh -c 'cat " + statusDir + "/status.json 2>/dev/null; echo; echo @@; systemctl --user show -p ActiveState --value " + unit + "'"
+    // Credentials are fed to curl on stdin so the password never shows up in `ps`
+    readonly property string statsCmd: "sh -c '. ~/.config/rclone-protondrive/rc.env 2>/dev/null; printf \"user = \\\"%s:%s\\\"\\n\" \"$RCLONE_RC_USER\" \"$RCLONE_RC_PASS\" | curl -sS -m 5 -K - -X POST http://localhost:5573/core/stats'"
+    property var stats: null
+
+    function fmtBytes(b) {
+        const u = ["B", "KiB", "MiB", "GiB", "TiB"]
+        let i = 0
+        while (b >= 1024 && i < u.length - 1) { b /= 1024; i++ }
+        return b.toFixed(i ? 1 : 0) + " " + u[i]
+    }
+    function fmtDur(sec) {
+        sec = Math.round(sec)
+        const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60
+        return (h ? h + "h " : "") + (h || m ? m + "m " : "") + s + "s"
+    }
+    function refreshStats() {
+        if (root.expanded && root.running) exec.connectSource(statsCmd)
+        else root.stats = null
+    }
+
     // True while systemd says the unit is running, even if the status file predates it
     property bool running: false
     readonly property string effectiveState: running ? "syncing" : status.state
@@ -59,11 +79,14 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
-            if (source === root.queryCmd) {
+            if (source === root.statsCmd) {
+                try { root.stats = JSON.parse(data.stdout) } catch (e) { root.stats = null }
+            } else if (source === root.queryCmd) {
                 const parts = (data.stdout || "").split("@@")
                 try { root.status = JSON.parse(parts[0]) } catch (e) { root.status = { state: "unknown" } }
                 const active = (parts[1] || "").trim()
                 root.running = active === "active" || active === "activating" || active === "deactivating"
+                root.refreshStats()
                 // Re-arm: blocks until the status file or the unit's D-Bus state changes
                 connectSource("python3 " + root.waitScript + " " + root.statusDir + " " + root.unit)
             } else {
@@ -75,7 +98,7 @@ PlasmoidItem {
     Component.onCompleted: exec.connectSource(queryCmd)
 
     // Cheap safety net for the instant between a waiter exiting and being re-armed
-    onExpandedChanged: if (expanded) exec.connectSource(queryCmd)
+    onExpandedChanged: { if (expanded) exec.connectSource(queryCmd); else stats = null }
 
     function syncNow() {
         exec.connectSource("systemctl --user start --no-block " + unit)
@@ -116,6 +139,38 @@ PlasmoidItem {
             visible: root.effectiveState === "syncing" && root.status.state === "syncing"
             text: i18n("Started %1", root.ago(root.status.since))
             opacity: 0.7
+        }
+        ColumnLayout {
+            visible: root.effectiveState === "syncing" && root.stats !== null
+            Layout.fillWidth: true
+            spacing: 0
+            PlasmaComponents.ProgressBar {
+                Layout.fillWidth: true
+                visible: root.stats && root.stats.totalBytes > 0
+                from: 0
+                to: root.stats ? Math.max(1, root.stats.totalBytes) : 1
+                value: root.stats ? root.stats.bytes : 0
+            }
+            PlasmaComponents.Label {
+                visible: root.stats && root.stats.totalBytes > 0
+                text: root.stats ? i18n("%1 / %2 at %3/s%4", root.fmtBytes(root.stats.bytes), root.fmtBytes(root.stats.totalBytes),
+                    root.fmtBytes(root.stats.speed), root.stats.eta ? i18n(", ETA %1", root.fmtDur(root.stats.eta)) : "") : ""
+            }
+            PlasmaComponents.Label {
+                text: root.stats ? i18n("Checked %1 files, %2 transfers, elapsed %3",
+                    root.stats.checks, root.stats.transfers, root.fmtDur(root.stats.elapsedTime)) : ""
+                opacity: 0.7
+            }
+            Repeater {
+                model: root.stats && root.stats.transferring ? root.stats.transferring : []
+                PlasmaComponents.Label {
+                    required property var modelData
+                    text: modelData.name + " (" + modelData.percentage + "%)"
+                    elide: Text.ElideMiddle
+                    Layout.fillWidth: true
+                    opacity: 0.7
+                }
+            }
         }
         PlasmaComponents.Label {
             text: i18n("Last successful sync: %1", root.ago(root.status.lastOk))
