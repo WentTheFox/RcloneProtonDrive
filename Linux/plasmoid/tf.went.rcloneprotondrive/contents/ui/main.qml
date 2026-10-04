@@ -14,9 +14,13 @@ PlasmoidItem {
     readonly property string statusDir: "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rclone-protondrive"
     readonly property string waitScript: Qt.resolvedUrl("../scripts/wait-for-change").toString().replace("file://", "")
     readonly property string unit: "rclone-protondrive-sync.service"
+    readonly property string queryCmd: "sh -c 'cat " + statusDir + "/status.json 2>/dev/null; echo; echo @@; systemctl --user show -p ActiveState --value " + unit + "'"
+    // True while systemd says the unit is running, even if the status file predates it
+    property bool running: false
+    readonly property string effectiveState: running ? "syncing" : status.state
 
     readonly property string iconName: {
-        switch (status.state) {
+        switch (effectiveState) {
         case "syncing": return "folder-sync"
         case "idle": return "folder-cloud"
         case "error": return "dialog-error"
@@ -24,7 +28,7 @@ PlasmoidItem {
         }
     }
     readonly property string stateText: {
-        switch (status.state) {
+        switch (effectiveState) {
         case "syncing": return i18n("Syncing…")
         case "idle": return i18n("Up to date")
         case "error": return i18n("Sync failed")
@@ -34,9 +38,9 @@ PlasmoidItem {
 
     Plasmoid.icon: iconName
     toolTipMainText: i18n("Proton Drive")
-    toolTipSubText: status.state === "error" && status.message ? status.message : stateText
-    Plasmoid.status: status.state === "error" ? PlasmaCore.Types.NeedsAttentionStatus
-        : status.state === "syncing" ? PlasmaCore.Types.ActiveStatus
+    toolTipSubText: effectiveState === "error" && status.message ? status.message : stateText
+    Plasmoid.status: effectiveState === "error" ? PlasmaCore.Types.NeedsAttentionStatus
+        : effectiveState === "syncing" ? PlasmaCore.Types.ActiveStatus
         : PlasmaCore.Types.PassiveStatus
 
     function ago(ts) {
@@ -48,27 +52,30 @@ PlasmoidItem {
         return i18n("%1 d ago", Math.floor(s / 86400))
     }
 
-    // One executable source per command; each exits and is re-armed, so there is no timer.
+    // Each command exits and is re-armed, so there is no timer.
     P5Support.DataSource {
         id: exec
         engine: "executable"
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
-            if (source.indexOf("cat ") === 0) {
-                try { root.status = JSON.parse(data.stdout) } catch (e) { root.status = { state: "unknown" } }
-                // Re-arm: blocks (inotify) until the helper rewrites the file
-                connectSource("python3 " + root.waitScript + " " + root.statusDir)
-            } else if (source.indexOf("wait-for-change") >= 0 || source.indexOf(root.waitScript) >= 0) {
-                connectSource("cat " + root.statusDir + "/status.json 2>/dev/null")
+            if (source === root.queryCmd) {
+                const parts = (data.stdout || "").split("@@")
+                try { root.status = JSON.parse(parts[0]) } catch (e) { root.status = { state: "unknown" } }
+                const active = (parts[1] || "").trim()
+                root.running = active === "active" || active === "activating" || active === "deactivating"
+                // Re-arm: blocks until the status file or the unit's D-Bus state changes
+                connectSource("python3 " + root.waitScript + " " + root.statusDir + " " + root.unit)
+            } else {
+                connectSource(root.queryCmd)
             }
         }
     }
 
-    Component.onCompleted: exec.connectSource("cat " + statusDir + "/status.json 2>/dev/null")
+    Component.onCompleted: exec.connectSource(queryCmd)
 
     // Cheap safety net for the instant between a waiter exiting and being re-armed
-    onExpandedChanged: if (expanded) exec.connectSource("cat " + statusDir + "/status.json 2>/dev/null")
+    onExpandedChanged: if (expanded) exec.connectSource(queryCmd)
 
     function syncNow() {
         exec.connectSource("systemctl --user start --no-block " + unit)
@@ -78,7 +85,7 @@ PlasmoidItem {
         PlasmaCore.Action {
             text: i18n("Sync now")
             icon.name: "view-refresh"
-            enabled: root.status.state !== "syncing"
+            enabled: root.effectiveState !== "syncing"
             onTriggered: root.syncNow()
         },
         PlasmaCore.Action {
@@ -106,7 +113,7 @@ PlasmoidItem {
             PlasmaComponents.Label { text: root.stateText; font.bold: true; Layout.fillWidth: true }
         }
         PlasmaComponents.Label {
-            visible: root.status.state === "syncing"
+            visible: root.effectiveState === "syncing" && root.status.state === "syncing"
             text: i18n("Started %1", root.ago(root.status.since))
             opacity: 0.7
         }
@@ -115,7 +122,7 @@ PlasmoidItem {
             opacity: 0.7
         }
         PlasmaComponents.Label {
-            visible: root.status.state === "error"
+            visible: root.effectiveState === "error"
             text: (root.status.errors && root.status.errors.length ? root.status.errors.join("\n") : root.status.message)
             color: Kirigami.Theme.negativeTextColor
             wrapMode: Text.Wrap
@@ -125,7 +132,7 @@ PlasmoidItem {
         PlasmaComponents.Button {
             text: i18n("Sync now")
             icon.name: "view-refresh"
-            enabled: root.status.state !== "syncing"
+            enabled: root.effectiveState !== "syncing"
             onClicked: root.syncNow()
         }
     }

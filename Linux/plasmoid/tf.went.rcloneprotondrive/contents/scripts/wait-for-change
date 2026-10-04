@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""Blocks until a file in the given directory is created/replaced, then exits.
-Event-driven (inotify), no polling. Usage: wait-for-change <dir>"""
-import ctypes, os, struct, sys
+"""Blocks until the status file changes OR the sync unit changes state, then exits.
+Event-driven (inotify + systemd D-Bus signals), no polling.
+Usage: wait-for-change <status-dir> <unit>"""
+import ctypes, os, select, subprocess, sys
 
-d = sys.argv[1]
+d, unit = sys.argv[1], sys.argv[2]
 os.makedirs(d, exist_ok=True)
+
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 IN_CLOSE_WRITE, IN_MOVED_TO, IN_CREATE = 0x8, 0x80, 0x100
 fd = libc.inotify_init()
 if libc.inotify_add_watch(fd, d.encode(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0:
     sys.exit("inotify_add_watch failed")
-os.read(fd, 4096)
+
+# systemd object path escaping: '-' -> _2d, '.' -> _2e
+path = "/org/freedesktop/systemd1/unit/" + unit.replace("-", "_2d").replace(".", "_2e")
+mon = subprocess.Popen(
+    ["busctl", "--user", "monitor", "--match",
+     f"type='signal',sender='org.freedesktop.systemd1',member='PropertiesChanged',path='{path}'"],
+    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+try:
+    select.select([fd, mon.stdout], [], [])
+finally:
+    mon.kill()
