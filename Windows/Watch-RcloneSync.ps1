@@ -5,6 +5,14 @@
 # sync can't silently sit broken for days the way it did before this existed.
 # Run via Register-Tray.ps1 (logon scheduled task), or manually:
 #   powershell -NoProfile -WindowStyle Hidden -File Watch-RcloneSync.ps1
+
+# Single instance: a theme-change restart launches the new copy while the old one is
+# still shutting down, so wait (briefly) for the old one to release the mutex, and
+# bail out if it never does rather than ever running two trays.
+$global:RcloneTrayMutex = New-Object System.Threading.Mutex($false, 'Local\RcloneProtonTray')
+try { $acquired = $global:RcloneTrayMutex.WaitOne(15000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+if (-not $acquired) { exit }
+
 # SystemEvents is a static event raised on its own thread, which PowerShell script
 # blocks can't handle directly, so a tiny C# shim marshals it onto the UI thread.
 # (Compiled before FreeConsole: Add-Type needs a console handle.)
@@ -375,6 +383,9 @@ function global:Get-RcloneThemeKey {
 }
 $global:RcloneThemeKey = Get-RcloneThemeKey
 function global:Restart-RcloneTray {
+    # A theme change raises several events; only the first may spawn a replacement
+    if ($global:RcloneRestarting) { return }
+    $global:RcloneRestarting = $true
     Start-Process "$env:SystemRoot\System32\wscript.exe" -ArgumentList "`"$($global:RcloneTrayRoot)\Launch-Tray.vbs`""
     $global:RcloneTrayNotify.Visible = $false
     [System.Windows.Forms.Application]::Exit()
