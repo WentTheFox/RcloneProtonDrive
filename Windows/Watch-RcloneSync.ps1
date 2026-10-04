@@ -376,9 +376,9 @@ function global:Get-RcloneStats {
     } catch { }  # keep the last snapshot rather than flicker
 }
 
-function global:Update-RcloneTrayPopup {
+function global:Update-RcloneTrayPopup([switch]$Force) {
     $f = $global:RcloneTrayPopup
-    if (-not $f.Visible) { return }
+    if (-not $f.Visible -and -not $Force) { return }
     $c = $global:PopupCtl
     $syncing = $global:RcloneSyncing
     $failed = (-not $syncing) -and $global:RcloneLastError
@@ -408,7 +408,7 @@ function global:Update-RcloneTrayPopup {
     $c.Sync.Cursor = if ($syncing) { "Default" } else { "Hand" }
     $c.Sync.BackColor = if ($syncing) { $global:PopupTrack } else { $global:PopupAccent }
     $c.Sync.ForeColor = if ($syncing) { $global:PopupDim } else { [System.Drawing.Color]::White }
-    $f.Timer.Enabled = $syncing
+    $f.Timer.Enabled = $syncing -and $f.Visible
 }
 
 $timer = New-Object System.Windows.Forms.Timer
@@ -417,19 +417,23 @@ $timer.Add_Tick({ Get-RcloneStats; Update-RcloneTrayPopup })
 $form | Add-Member -NotePropertyName Timer -NotePropertyValue $timer
 
 $form.Add_Deactivate({ $global:RcloneTrayPopupHiddenAt = Get-Date; $this.Hide(); $this.Timer.Enabled = $false })
-$form.Add_SizeChanged({
-    if ($this.Visible) {
-        $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
-        $this.Location = New-Object System.Drawing.Point ($wa.Right - $this.Width - 8), ($wa.Bottom - $this.Height - 8)
-    }
-})
+function global:Set-PopupPosition {
+    $f = $global:RcloneTrayPopup
+    $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+    $f.Location = New-Object System.Drawing.Point ($wa.Right - $f.Width - 8), ($wa.Bottom - $f.Height - 8)
+}
+$form.Add_SizeChanged({ if ($this.Visible) { Set-PopupPosition } })
 
 function global:Toggle-RcloneTrayPopup {
     $f = $global:RcloneTrayPopup
     # The click that dismisses the popup arrives right after Deactivate hid it; don't reopen
     if ($f.Visible -or ((Get-Date) - $global:RcloneTrayPopupHiddenAt).TotalMilliseconds -lt 300) { $f.Hide(); return }
+    # Lay out with the real content *before* the first Show: otherwise the first opening
+    # is sized for every (still visible) control and only shrinks afterwards.
+    Update-RcloneTrayPopup -Force
+    $f.PerformLayout()
+    Set-PopupPosition
     $f.Show()
-    Update-RcloneTrayPopup
     $f.Activate()
     if ($global:RcloneSyncing) { Get-RcloneStats; Update-RcloneTrayPopup }
 }
