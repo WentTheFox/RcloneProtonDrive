@@ -18,6 +18,15 @@ PlasmoidItem {
     // Credentials are fed to curl on stdin so the password never shows up in `ps`
     readonly property string statsCmd: "sh -c '. ~/.config/rclone-protondrive/rc.env 2>/dev/null; printf \"user = \\\"%s:%s\\\"\\n\" \"$RCLONE_RC_USER\" \"$RCLONE_RC_PASS\" | curl -sS -m 5 -K - -X POST http://localhost:5573/core/stats'"
     property var stats: null
+    // Local clock so "elapsed" advances between snapshots without querying rclone
+    property double statsAt: 0
+    property double now: Date.now()
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.expanded && root.stats !== null
+        onTriggered: root.now = Date.now()
+    }
 
     function fmtBytes(b) {
         const u = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -80,7 +89,7 @@ PlasmoidItem {
         onNewData: (source, data) => {
             disconnectSource(source)
             if (source === root.statsCmd) {
-                try { root.stats = JSON.parse(data.stdout) } catch (e) { root.stats = null }
+                try { root.stats = JSON.parse(data.stdout); root.statsAt = Date.now(); root.now = root.statsAt } catch (e) { root.stats = null }
             } else if (source === root.queryCmd) {
                 const parts = (data.stdout || "").split("@@")
                 try { root.status = JSON.parse(parts[0]) } catch (e) { root.status = { state: "unknown" } }
@@ -158,7 +167,7 @@ PlasmoidItem {
             }
             PlasmaComponents.Label {
                 text: root.stats ? i18n("Checked %1 files, %2 transfers, elapsed %3",
-                    root.stats.checks, root.stats.transfers, root.fmtDur(root.stats.elapsedTime)) : ""
+                    root.stats.checks, root.stats.transfers, root.fmtDur(root.stats.elapsedTime + (root.now - root.statsAt) / 1000)) : ""
                 opacity: 0.7
             }
             Repeater {
