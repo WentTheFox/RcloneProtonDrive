@@ -201,7 +201,7 @@ $panel.BackColor = $cBg
 $panel.Location = New-Object System.Drawing.Point $form.Padding.Left, $form.Padding.Top
 $form.Controls.Add($panel)
 
-function New-PopupLabel($font = $fontBody, $color = $cFg, [int]$top = 0, [int]$bottom = 10) {
+function New-PopupLabel($font = $fontBody, $color = $cFg, [int]$top = 0, [int]$bottom = 10, $parent = $panel) {
     $l = New-Object System.Windows.Forms.Label
     $l.AutoSize = $true
     $l.Font = $font
@@ -209,10 +209,34 @@ function New-PopupLabel($font = $fontBody, $color = $cFg, [int]$top = 0, [int]$b
     $l.BackColor = $cBg
     $l.MaximumSize = New-Object System.Drawing.Size $contentWidth, 0
     $l.Margin = New-Object System.Windows.Forms.Padding 0, $top, 0, $bottom
-    $panel.Controls.Add($l)
+    $parent.Controls.Add($l)
     $l
 }
-$lblState = New-PopupLabel $fontTitle $cFg 0 4
+# Header: state icon beside "Proton Drive sync" and the state text
+$header = New-Object System.Windows.Forms.FlowLayoutPanel
+$header.FlowDirection = 'LeftToRight'
+$header.WrapContents = $false
+$header.AutoSize = $true
+$header.BackColor = $cBg
+$header.Margin = New-Object System.Windows.Forms.Padding 0, 0, 0, 4
+$panel.Controls.Add($header)
+$picState = New-Object System.Windows.Forms.PictureBox
+$picState.Size = New-Object System.Drawing.Size 40, 40
+$picState.SizeMode = 'Zoom'
+$picState.Margin = New-Object System.Windows.Forms.Padding 0, 0, 12, 0
+$header.Controls.Add($picState)
+$titleCol = New-Object System.Windows.Forms.FlowLayoutPanel
+$titleCol.FlowDirection = 'TopDown'
+$titleCol.WrapContents = $false
+$titleCol.AutoSize = $true
+$titleCol.BackColor = $cBg
+$titleCol.Margin = New-Object System.Windows.Forms.Padding 0
+$header.Controls.Add($titleCol)
+$lblTitle = New-PopupLabel $fontSmall $cDim 0 0 $titleCol
+$lblTitle.Text = 'Proton Drive sync'
+$lblState = New-PopupLabel $fontTitle $cFg 0 0 $titleCol
+$global:PopupImages = @{}
+foreach ($n in 'synced', 'syncing', 'error', 'idle') { $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$Root\icons\$n.png") }
 $lblSince = New-PopupLabel $fontSmall $cDim 0 16
 $barTrack = New-Object System.Windows.Forms.Panel
 $barTrack.Size = New-Object System.Drawing.Size $contentWidth, 4
@@ -244,7 +268,7 @@ $global:PopupAccent = $accent; $global:PopupTrack = $cTrack; $global:PopupDim = 
 
 $global:RcloneTrayPopup = $form
 $global:RcloneTrayPopupHiddenAt = [datetime]::MinValue
-$global:PopupCtl = @{ State = $lblState; Since = $lblSince; Bar = $bar; BarTrack = $barTrack; Bytes = $lblBytes; Counts = $lblCounts
+$global:PopupCtl = @{ Pic = $picState; State = $lblState; Since = $lblSince; Bar = $bar; BarTrack = $barTrack; Bytes = $lblBytes; Counts = $lblCounts
                       Files = $lblFiles; LastOk = $lblLastOk; Error = $lblError; Sync = $btnSync }
 
 function global:Get-RcloneStats {
@@ -262,6 +286,7 @@ function global:Update-RcloneTrayPopup {
     $c = $global:PopupCtl
     $syncing = $global:RcloneSyncing
     $failed = (-not $syncing) -and $global:RcloneLastError
+    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
     $c.State.Text = if ($syncing) { 'Syncing...' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
     $c.Since.Visible = $syncing
     if ($syncing) { $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)" }

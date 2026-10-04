@@ -151,8 +151,14 @@ PlasmoidItem {
         spacing: Kirigami.Units.smallSpacing
 
         RowLayout {
-            Kirigami.Icon { source: root.iconName; implicitWidth: Kirigami.Units.iconSizes.medium; implicitHeight: implicitWidth }
-            PlasmaComponents.Label { text: root.stateText; font.bold: true; Layout.fillWidth: true }
+            spacing: Kirigami.Units.largeSpacing
+            Kirigami.Icon { source: root.iconName; implicitWidth: Kirigami.Units.iconSizes.large; implicitHeight: implicitWidth }
+            ColumnLayout {
+                spacing: 0
+                Layout.fillWidth: true
+                PlasmaComponents.Label { text: i18n("Proton Drive sync"); opacity: 0.7; font: Kirigami.Theme.smallFont }
+                PlasmaComponents.Label { text: root.stateText; font.bold: true; font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2 }
+            }
         }
         PlasmaComponents.Label {
             visible: root.effectiveState === "syncing" && root.status.state === "syncing"
