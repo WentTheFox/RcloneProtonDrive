@@ -19,4 +19,4 @@ systemctl --user enable --now rclone-protondrive-sync.timer
 
 kpackagetool6 -t Plasma/Applet -u "$here/plasmoid/tf.went.rcloneprotondrive" 2>/dev/null \
     || kpackagetool6 -t Plasma/Applet -i "$here/plasmoid/tf.went.rcloneprotondrive"
-echo "Done. Add the 'Proton Drive Sync' widget to your panel."
+echo "Done. Add the 'Proton Drive Sync' widget to your panel (if updating, remove and re-add it; do not restart plasmashell)."

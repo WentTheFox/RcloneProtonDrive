@@ -154,5 +154,12 @@ inotify watcher (no polling), so it updates the moment a run starts or ends. It
 shows syncing / up to date / failed, the last successful sync time, and the last
 error lines from the journal; right-click offers **Sync now** and **Open web UI**.
 
+**Updating the widget:** re-running `install.sh` upgrades the files but doesn't
+touch the running desktop. Plasma only loads new widget code when the widget is
+(re)loaded, so remove and re-add it to the panel/tray. Avoid restarting
+`plasma-plasmashell.service` to pick it up: Plasma writes layout changes to
+`~/.config/plasma-org.kde.plasma.desktop-appletsrc` after a short delay, and a
+restart before that can discard recent widget/tray changes.
+
 `rclone-protondrive-download.service` is a one-shot initial `rclone copy` that
 disables itself once a clean pass finishes.
