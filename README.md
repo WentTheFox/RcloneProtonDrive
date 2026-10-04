@@ -156,10 +156,14 @@ error lines from the journal; right-click offers **Sync now** and **Open web UI*
 
 **Updating the widget:** re-running `install.sh` upgrades the files but doesn't
 touch the running desktop. Plasma only loads new widget code when the widget is
-(re)loaded, so remove and re-add it to the panel/tray. Avoid restarting
-`plasma-plasmashell.service` to pick it up: Plasma writes layout changes to
-`~/.config/plasma-org.kde.plasma.desktop-appletsrc` after a short delay, and a
-restart before that can discard recent widget/tray changes.
+(re)loaded, so either remove and re-add it, or restart Plasma
+(`systemctl --user restart plasma-plasmashell.service`). Before restarting,
+make sure your layout has been saved: Plasma writes widget/tray/desktop-icon
+changes to `~/.config/plasma-org.kde.plasma.desktop-appletsrc` after a short
+delay, and a restart before that discards them. Check that
+`grep rcloneprotondrive ~/.config/plasma-org.kde.plasma.desktop-appletsrc`
+finds the widget and that the file's modification time is newer than your last
+layout change, and copy it somewhere as a backup first.
 
 `rclone-protondrive-download.service` is a one-shot initial `rclone copy` that
 disables itself once a clean pass finishes.

@@ -19,4 +19,6 @@ systemctl --user enable --now rclone-protondrive-sync.timer
 
 kpackagetool6 -t Plasma/Applet -u "$here/plasmoid/tf.went.rcloneprotondrive" 2>/dev/null \
     || kpackagetool6 -t Plasma/Applet -i "$here/plasmoid/tf.went.rcloneprotondrive"
-echo "Done. Add the 'Proton Drive Sync' widget to your panel (if updating, remove and re-add it; do not restart plasmashell)."
+echo "Done. Add the 'Proton Drive Sync' widget to your panel. To load an update, re-add the widget"
+echo "or restart plasmashell, but first check ~/.config/plasma-org.kde.plasma.desktop-appletsrc has"
+echo "saved your latest layout changes (and back it up)."
