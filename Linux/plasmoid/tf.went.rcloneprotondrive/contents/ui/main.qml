@@ -18,14 +18,16 @@ PlasmoidItem {
     // Credentials are fed to curl on stdin so the password never shows up in `ps`
     readonly property string statsCmd: "sh -c '. ~/.config/rclone-protondrive/rc.env 2>/dev/null; printf \"user = \\\"%s:%s\\\"\\n\" \"$RCLONE_RC_USER\" \"$RCLONE_RC_PASS\" | curl -sS -m 5 -K - -X POST http://localhost:5573/core/stats'"
     property var stats: null
-    // Local clock so "elapsed" advances between snapshots without querying rclone
+    // Refreshed about once a second, but only while the popup is open during a sync,
+    // and never with a request already in flight (curl is capped at 5s by -m)
+    property bool statsPending: false
     property double statsAt: 0
     property double now: Date.now()
     Timer {
         interval: 1000
         repeat: true
-        running: root.expanded && root.stats !== null
-        onTriggered: root.now = Date.now()
+        running: root.expanded && root.running
+        onTriggered: { root.now = Date.now(); root.requestStats() }
     }
 
     function fmtBytes(b) {
@@ -39,8 +41,13 @@ PlasmoidItem {
         const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60
         return (h ? h + "h " : "") + (h || m ? m + "m " : "") + s + "s"
     }
+    function requestStats() {
+        if (statsPending) return
+        statsPending = true
+        exec.connectSource(statsCmd)
+    }
     function refreshStats() {
-        if (root.expanded && root.running) exec.connectSource(statsCmd)
+        if (root.expanded && root.running) requestStats()
         else root.stats = null
     }
 
@@ -89,7 +96,9 @@ PlasmoidItem {
         onNewData: (source, data) => {
             disconnectSource(source)
             if (source === root.statsCmd) {
-                try { root.stats = JSON.parse(data.stdout); root.statsAt = Date.now(); root.now = root.statsAt } catch (e) { root.stats = null }
+                root.statsPending = false
+                // On a failed request keep showing the last snapshot rather than flicker
+                try { root.stats = JSON.parse(data.stdout); root.statsAt = Date.now(); root.now = root.statsAt } catch (e) {}
             } else if (source === root.queryCmd) {
                 const parts = (data.stdout || "").split("@@")
                 try { root.status = JSON.parse(parts[0]) } catch (e) { root.status = { state: "unknown" } }
