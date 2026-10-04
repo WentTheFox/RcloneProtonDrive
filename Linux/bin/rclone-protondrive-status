@@ -3,14 +3,23 @@
 
 Usage: rclone-protondrive-status syncing
        rclone-protondrive-status finished   (reads SERVICE_RESULT/EXIT_STATUS from systemd)
+
+Besides the status file it keeps a small persistent history of how many files each
+successful run checked, so the widget can show a rough progress bar: rclone's own
+counter starts at 0 for every run, and the median of the last few runs is the estimate.
 """
-import json, os, re, subprocess, sys, time
+import glob, json, os, re, statistics, subprocess, sys, time
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 UNIT = "rclone-protondrive-sync.service"
 RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 PATH = os.path.join(RUNTIME, "rclone-protondrive", "status.json")
+# Written by the widget just before it stops the unit, so a user stop isn't reported as a failure
+STOP_MARKER = os.path.join(RUNTIME, "rclone-protondrive", "stop-requested")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "rclone-protondrive")
+HISTORY = os.path.join(STATE_DIR, "history.json")
+CHECKS = re.compile(r"Checks:\s+(\d+)\s*/\s*(\d+)")
 
 
 def read():
@@ -29,13 +38,59 @@ def write(d):
     os.replace(tmp, PATH)  # atomic rename -> one inotify event for the watcher
 
 
-def recent_errors():
+def journal_lines(n):
     # Only this run's log lines (systemd sets INVOCATION_ID for ExecStopPost too)
     inv = os.environ.get("INVOCATION_ID")
-    cmd = ["journalctl", "--user", "-u", UNIT, "-o", "cat", "--no-pager", "-n", "400"]
+    cmd = ["journalctl", "--user", "-u", UNIT, "-o", "cat", "--no-pager", "-n", str(n)]
     if inv:
         cmd.append(f"_SYSTEMD_INVOCATION_ID={inv}")
-    out = subprocess.run(cmd, capture_output=True, text=True).stdout.splitlines()
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.splitlines()
+
+
+def checked_files(lines):
+    """Files rclone checked this run, from the last '--stats' block in the log (None if absent)."""
+    last = None
+    for l in lines:
+        m = CHECKS.search(ANSI.sub("", l))
+        if m:
+            last = int(m.group(1))
+    return last
+
+
+def load_history():
+    try:
+        with open(HISTORY) as f:
+            return json.load(f).get("runs", [])
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def save_run(checks, seconds):
+    runs = (load_history() + [{"checks": checks, "seconds": seconds}])[-5:]
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = HISTORY + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"runs": runs}, f)
+    os.replace(tmp, HISTORY)
+
+
+def expected_checks():
+    """Median of recent runs; before there is any history, the size of bisync's last listing."""
+    known = [r["checks"] for r in load_history() if r.get("checks", 0) > 0]
+    if known:
+        return int(statistics.median(known))
+    lists = glob.glob(os.path.expanduser("~/.cache/rclone/bisync/*.path1.lst"))
+    if lists:
+        try:
+            with open(lists[0], errors="replace") as f:
+                return sum(1 for _ in f)
+        except OSError:
+            pass
+    return None
+
+
+def recent_errors():
+    out = journal_lines(400)
     errs = [l for l in out if "ERROR" in l or "CRITICAL" in l or "Bisync critical error" in l or "Failed" in l]
     return [ANSI.sub("", l).strip() for l in errs[-5:]]
 
@@ -45,12 +100,27 @@ def main():
     now = int(time.time())
     prev = read()
     if mode == "syncing":
+        try:
+            os.remove(STOP_MARKER)  # a stale marker from an earlier stop must not mask a real failure
+        except OSError:
+            pass
         write({"state": "syncing", "since": now, "lastOk": prev.get("lastOk"), "lastResult": prev.get("lastResult"),
-               "errors": [], "message": ""})
+               "errors": [], "message": "", "expected": expected_checks()})
     elif mode == "finished":
         result = os.environ.get("SERVICE_RESULT", "unknown")
         code = os.environ.get("EXIT_STATUS", "")
-        if result == "success":
+        stopped = os.path.exists(STOP_MARKER)
+        if stopped:
+            try:
+                os.remove(STOP_MARKER)
+            except OSError:
+                pass
+            write({"state": "stopped", "since": now, "lastOk": prev.get("lastOk"), "lastResult": "stopped",
+                   "errors": [], "message": ""})
+        elif result == "success":
+            checks = checked_files(journal_lines(2000))
+            if checks:
+                save_run(checks, now - prev.get("since", now))
             write({"state": "idle", "since": now, "lastOk": now, "lastResult": "success", "errors": [], "message": ""})
         else:
             errs = recent_errors()
@@ -61,4 +131,5 @@ def main():
         sys.exit(__doc__)
 
 
-main()
+if __name__ == "__main__":
+    main()

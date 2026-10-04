@@ -62,6 +62,7 @@ PlasmoidItem {
         case "syncing": return "syncing"
         case "idle": return "synced"
         case "error": return "error"
+        case "stopped": return "idle"
         default: return "idle"
         }
     }    readonly property string stateText: {
@@ -69,6 +70,7 @@ PlasmoidItem {
         case "syncing": return i18n("Syncing…")
         case "idle": return i18n("Up to date")
         case "error": return i18n("Sync failed")
+        case "stopped": return i18n("Sync stopped")
         default: return i18n("No sync run yet")
         }
     }
@@ -119,6 +121,15 @@ PlasmoidItem {
     // Cheap safety net for the instant between a waiter exiting and being re-armed
     onExpandedChanged: { if (expanded) exec.connectSource(queryCmd); else stats = null }
 
+    // The marker tells the status helper this was a user stop, not a failure
+    function stopSync() {
+        exec.connectSource("sh -c 'mkdir -p " + statusDir + " && touch " + statusDir + "/stop-requested && systemctl --user stop " + unit + "'")
+    }
+
+    // Rough progress without byte totals: files checked this run vs. the median of past runs
+    // (rclone's counter restarts at 0 every run; the helper keeps the history)
+    readonly property real fileFraction: (stats && status.expected > 0) ? Math.min(0.99, stats.checks / status.expected) : -1
+
     function syncNow() {
         exec.connectSource("systemctl --user start --no-block " + unit)
     }
@@ -129,6 +140,12 @@ PlasmoidItem {
             icon.name: "view-refresh"
             enabled: root.effectiveState !== "syncing"
             onTriggered: root.syncNow()
+        },
+        PlasmaCore.Action {
+            text: i18n("Stop sync")
+            icon.name: "process-stop"
+            enabled: root.effectiveState === "syncing"
+            onTriggered: root.stopSync()
         },
         PlasmaCore.Action {
             text: i18n("Open web UI")
@@ -171,15 +188,17 @@ PlasmoidItem {
             spacing: 0
             PlasmaComponents.ProgressBar {
                 Layout.fillWidth: true
-                visible: root.stats && root.stats.totalBytes > 0
+                visible: (root.stats && root.stats.totalBytes > 0) || root.fileFraction >= 0
                 from: 0
-                to: root.stats ? Math.max(1, root.stats.totalBytes) : 1
-                value: root.stats ? root.stats.bytes : 0
+                to: (root.stats && root.stats.totalBytes > 0) ? root.stats.totalBytes : 1
+                value: (root.stats && root.stats.totalBytes > 0) ? root.stats.bytes : Math.max(0, root.fileFraction)
             }
             PlasmaComponents.Label {
-                visible: root.stats && root.stats.totalBytes > 0
-                text: root.stats ? i18n("%1 / %2 at %3/s%4", root.fmtBytes(root.stats.bytes), root.fmtBytes(root.stats.totalBytes),
-                    root.fmtBytes(root.stats.speed), root.stats.eta ? i18n(", ETA %1", root.fmtDur(root.stats.eta)) : "") : ""
+                visible: (root.stats && root.stats.totalBytes > 0) || root.fileFraction >= 0
+                text: (root.stats && root.stats.totalBytes > 0)
+                    ? i18n("%1 / %2 at %3/s%4", root.fmtBytes(root.stats.bytes), root.fmtBytes(root.stats.totalBytes),
+                        root.fmtBytes(root.stats.speed), root.stats.eta ? i18n(", ETA %1", root.fmtDur(root.stats.eta)) : "")
+                    : i18n("About %1%: %2 of ~%3 files checked", Math.round(root.fileFraction * 100), root.stats ? root.stats.checks : 0, root.status.expected)
             }
             PlasmaComponents.Label {
                 text: root.stats ? i18n("Checked %1 files, %2 transfers, elapsed %3",
@@ -210,10 +229,9 @@ PlasmoidItem {
         }
         Item { Layout.fillHeight: true }
         PlasmaComponents.Button {
-            text: i18n("Sync now")
-            icon.name: "view-refresh"
-            enabled: root.effectiveState !== "syncing"
-            onClicked: root.syncNow()
+            text: root.effectiveState === "syncing" ? i18n("Stop sync") : i18n("Sync now")
+            icon.name: root.effectiveState === "syncing" ? "process-stop" : "view-refresh"
+            onClicked: root.effectiveState === "syncing" ? root.stopSync() : root.syncNow()
         }
     }
 }
