@@ -13,13 +13,26 @@ $global:RcloneTrayMutex = New-Object System.Threading.Mutex($false, 'Local\Rclon
 try { $acquired = $global:RcloneTrayMutex.WaitOne(15000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
 if (-not $acquired) { exit }
 
-# SystemEvents is a static event raised on its own thread, which PowerShell script
-# blocks can't handle directly, so a tiny C# shim marshals it onto the UI thread.
+# SystemEvents and FileSystemWatcher raise their events on background threads, which PowerShell
+# script blocks can't handle safely (Register-ObjectEvent actions race with shutdown and throw
+# PipelineStoppedException), so tiny C# shims marshal them onto the UI thread instead.
 # (Compiled before FreeConsole: Add-Type needs a console handle.)
 Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @"
 using System;
+using System.IO;
 using System.Windows.Forms;
 using Microsoft.Win32;
+public class WatcherBridge {
+    public WatcherBridge(FileSystemWatcher w, Control ui, Action callback) {
+        FileSystemEventHandler h = (s, e) => Post(ui, callback);
+        w.Changed += h; w.Created += h; w.Deleted += h;
+        w.Renamed += (s, e) => Post(ui, callback);
+        w.Error += (s, e) => Post(ui, callback);
+    }
+    static void Post(Control ui, Action cb) {
+        try { if (ui.IsHandleCreated && !ui.IsDisposed) ui.BeginInvoke(cb); } catch (Exception) { }
+    }
+}
 public class ThemeWatcher {
     public ThemeWatcher(Control ui, Action callback) {
         SystemEvents.UserPreferenceChanged += (s, e) => {
@@ -113,12 +126,24 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
     $global:RcloneSyncing = ($state -eq 'start')
     switch ($state) {
         'start' {
+            if (((Get-Date) - $when).TotalSeconds -lt 30) {
+                $s = Get-RcloneStatsNow
+                $global:RcloneRunStartChecks = if ($s) { $s.checks } else { $null }
+                $global:RcloneStats = $s
+            }
             $global:RcloneSyncSince = $when
             $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconSyncing
             $text = "Proton Drive sync: syncing ($stamp)"
             $global:RcloneTrayNotify.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
         }
         'ok' {
+            if ($null -ne $global:RcloneRunStartChecks -and ((Get-Date) - $when).TotalSeconds -lt 30) {
+                $s = Get-RcloneStatsNow
+                if ($s -and $s.checks -ge $global:RcloneRunStartChecks) {
+                    Save-RcloneRun ($s.checks - $global:RcloneRunStartChecks) (($when - $global:RcloneSyncSince).TotalSeconds)
+                }
+            }
+            $global:RcloneRunStartChecks = $null
             $global:RcloneLastOk = $when
             $global:RcloneLastError = ''
             $global:consecutiveFailures = 0
@@ -389,15 +414,44 @@ function global:Request-RcloneSync {
     Update-RcloneSyncRequested
 }
 $global:RcloneSyncRequested = Test-Path "$Root\sync-now"
-function global:Get-RcloneStats {
+function global:Get-RcloneStatsNow {
     try {
         $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
         $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
-        $global:RcloneStats = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5572/core/stats' `
-            -Headers @{ Authorization = $basic } -TimeoutSec 2
-    } catch { }  # keep the last snapshot rather than flicker
+        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5572/core/stats' -Headers @{ Authorization = $basic } -TimeoutSec 2
+    } catch { $null }  # keep the last snapshot rather than flicker
+}
+function global:Get-RcloneStats {
+    $s = Get-RcloneStatsNow
+    if ($s) { $global:RcloneStats = $s }
 }
 
+# --- Rough progress across runs ----------------------------------------------
+# rclone's counters are cumulative since the rc server started, so a run's file count is the
+# difference between the counter at the "sync starting" and "sync finished" log events (no
+# polling needed). The last few runs are kept in tray-state.json; their median is the
+# estimate for how many files the current run will check.
+$global:RcloneStateFile = "$Root\tray-state.json"
+$global:RcloneRunHistory = @()
+try { $global:RcloneRunHistory = @((Get-Content $global:RcloneStateFile -Raw | ConvertFrom-Json).runs) } catch { }
+$global:RcloneRunStartChecks = $null
+function global:Get-RcloneExpectedChecks {
+    $h = @($global:RcloneRunHistory | ForEach-Object { $_.checks } | Where-Object { $_ -gt 0 } | Sort-Object)
+    if ($h.Count) { return [double]$h[[int][Math]::Floor($h.Count / 2)] }
+    # First run ever: the bisync listing from the last run is a decent guess at the file count
+    $lst = Get-ChildItem "$($global:RcloneTrayRoot)\bisync\*.path1.lst" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($lst) { try { return [double]([System.IO.File]::ReadLines($lst.FullName) | Measure-Object).Count } catch { } }
+    $null
+}
+function global:Save-RcloneRun([double]$checks, [double]$seconds) {
+    $global:RcloneRunHistory = @($global:RcloneRunHistory + [pscustomobject]@{ checks = $checks; seconds = [int]$seconds }) | Select-Object -Last 5
+    try { @{ runs = @($global:RcloneRunHistory) } | ConvertTo-Json -Depth 3 | Set-Content $global:RcloneStateFile } catch { }
+}
+function global:Get-RcloneRunChecks {
+    if ($null -eq $global:RcloneRunStartChecks -or -not $global:RcloneStats) { return $null }
+    $d = $global:RcloneStats.checks - $global:RcloneRunStartChecks
+    if ($d -lt 0) { $null } else { $d }  # negative = rc server restarted mid-run
+}
 function global:Update-RcloneTrayPopup([switch]$Force) {
     $f = $global:RcloneTrayPopup
     if (-not $f.Visible -and -not $Force) { return }
@@ -412,21 +466,29 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     elseif ($syncing) { $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)" }
     $s = $global:RcloneStats
     $showStats = $syncing -and $s
-    $showBar = $showStats -and $s.totalBytes -gt 0
+    $bytesMode = $showStats -and $s.totalBytes -gt 0
+    # Files-based progress: this run's checked count vs. the median of previous runs
+    $done = if ($showStats) { Get-RcloneRunChecks } else { $null }
+    $expected = if ($showStats) { Get-RcloneExpectedChecks } else { $null }
+    $frac = if ($null -ne $done -and $expected) { [Math]::Min(0.99, $done / [Math]::Max(1.0, $expected)) } else { $null }
+    $showBar = $bytesMode -or ($null -ne $frac)
     $c.BarTrack.Visible = $showBar
     $c.Bytes.Visible = $showBar
-    if ($showBar) {
+    if ($bytesMode) {
         $c.Bar.Width = [int]($c.BarTrack.Width * [Math]::Min(1.0, $s.bytes / [Math]::Max(1, $s.totalBytes)))
         $eta = if ($s.eta) { ", ETA $(Format-Duration $s.eta)" } else { '' }
         $c.Bytes.Text = "$(Format-Bytes $s.bytes) / $(Format-Bytes $s.totalBytes) at $(Format-Bytes $s.speed)/s$eta"
+    } elseif ($showBar) {
+        $c.Bar.Width = [int]($c.BarTrack.Width * $frac)
+        $c.Bytes.Text = ('About {0:P0}: {1:N0} of ~{2:N0} files checked' -f $frac, $done, $expected)
     }
     $c.Counts.Visible = $showStats
     $c.Files.Visible = $showStats -and $s.transferring
     if ($showStats) {
-        $c.Counts.Text = "Checked $($s.checks) files, $($s.transfers) transfers, elapsed $(Format-Duration $s.elapsedTime)"
+        $checked = if ($null -ne $done) { $done } else { $s.checks }
+        $c.Counts.Text = "Checked $('{0:N0}' -f $checked) files, $($s.transfers) transfers, elapsed $(Format-Duration ((Get-Date) - $(if ($global:RcloneSyncSince) { $global:RcloneSyncSince } else { Get-Date })).TotalSeconds)"
         if ($s.transferring) { $c.Files.Text = (($s.transferring | ForEach-Object { "$($_.name) ($($_.percentage)%)" }) -join "`n") }
-    }
-    $c.LastOk.Text = "Last successful sync: $(Format-Ago $global:RcloneLastOk)"
+    }    $c.LastOk.Text = "Last successful sync: $(Format-Ago $global:RcloneLastOk)"
     $c.Error.Visible = [bool]$failed
     $c.Error.Text = $global:RcloneLastError
     $c.Sync.Text = if ($requested) { 'Starting...' } else { 'Sync now' }
@@ -468,11 +530,11 @@ if (Test-Path $LogFile) { Read-RcloneTrayNewLines }
 
 $watcher = New-Object System.IO.FileSystemWatcher (Split-Path $LogFile), (Split-Path $LogFile -Leaf)
 $watcher.NotifyFilter = [System.IO.NotifyFilters]'LastWrite, Size'
-Register-ObjectEvent $watcher Changed -Action { Read-RcloneTrayNewLines } | Out-Null
+$global:RcloneLogBridge = New-Object WatcherBridge $watcher, $form, ([Action]{ try { Read-RcloneTrayNewLines } catch { } })
 $watcher.EnableRaisingEvents = $true
 $triggerWatcher = New-Object System.IO.FileSystemWatcher $Root, 'sync-now'
 $triggerWatcher.NotifyFilter = [System.IO.NotifyFilters]'FileName'
-foreach ($ev in 'Created', 'Deleted', 'Renamed') { Register-ObjectEvent $triggerWatcher $ev -Action { Update-RcloneSyncRequested } | Out-Null }
+$global:RcloneTriggerBridge = New-Object WatcherBridge $triggerWatcher, $form, ([Action]{ try { Update-RcloneSyncRequested } catch { } })
 $triggerWatcher.EnableRaisingEvents = $true
 
 # Theme switches: re-theme the tray icons and popup in place when the light/dark or accent
@@ -492,7 +554,7 @@ $global:RcloneThemeDebounce = New-Object System.Windows.Forms.Timer
 $global:RcloneThemeDebounce.Interval = 1500
 $global:RcloneThemeDebounce.Add_Tick({
     $global:RcloneThemeDebounce.Stop()
-    Update-RcloneTheme
+    try { Update-RcloneTheme } catch { }
 })
 $global:RcloneThemeWatcher = New-Object ThemeWatcher $form, ([Action]{
     $global:RcloneThemeDebounce.Stop(); $global:RcloneThemeDebounce.Start()
