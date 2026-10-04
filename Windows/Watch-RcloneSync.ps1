@@ -84,7 +84,7 @@ $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $itemOpen = $menu.Items.Add('Open web UI')
 $itemOpen.Add_Click({ Start-Process (Get-WebGuiUrl) })
 $itemSync = $menu.Items.Add('Sync now')
-$itemSync.Add_Click({ New-Item -ItemType File -Force "$Root\sync-now" | Out-Null })
+$itemSync.Add_Click({ Request-RcloneSync })
 $menu.Items.Add('-') | Out-Null
 $itemRestart = $menu.Items.Add('Restart tray icon')
 $itemRestart.Add_Click({ Restart-RcloneTray })
@@ -313,7 +313,7 @@ $btnSync.Size = New-Object System.Drawing.Size $contentWidth, 34
 $btnSync.Margin = New-Object System.Windows.Forms.Padding 0, 14, 0, 0
 $btnSync.Cursor = 'Hand'
 $btnSync.UseVisualStyleBackColor = $false
-$btnSync.Add_Click({ if ($global:RcloneSyncing) { return }; New-Item -ItemType File -Force "$($global:RcloneTrayRoot)\sync-now" | Out-Null; $global:RcloneTrayPopup.Hide() })
+$btnSync.Add_Click({ Request-RcloneSync })
 $panel.Controls.Add($btnSync)
 $global:PopupAccent = $accent; $global:PopupTrack = $cTrack; $global:PopupDim = $cDim; $global:PopupFg = $cFg
 
@@ -367,6 +367,28 @@ function global:Update-RcloneTheme {
     $f.Invalidate($true)
     Update-RcloneTrayPopup
 }
+# "Sync now" drops a trigger file that the service consumes (deletes) within a few seconds and
+# then logs "sync starting". The file's existence *is* the pending state, so a file watcher on
+# it (created/deleted: events, no polling) drives a loading state until the run really begins.
+function global:Update-RcloneSyncRequested {
+    $global:RcloneSyncRequested = Test-Path "$($global:RcloneTrayRoot)\sync-now"
+    if ($global:RcloneSyncRequested -and -not $global:RcloneSyncing) {
+        $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconSyncing
+        $global:RcloneTrayNotify.Text = 'Proton Drive sync: sync requested'
+    } elseif (-not $global:RcloneSyncing) {
+        Set-RcloneCurrentIcon
+    }
+    Update-RcloneTrayPopup
+}
+function global:Request-RcloneSync {
+    if ($global:RcloneSyncing -or $global:RcloneSyncRequested) { return }
+    try { New-Item -ItemType File -Force "$($global:RcloneTrayRoot)\sync-now" | Out-Null } catch {
+        $global:RcloneTrayNotify.ShowBalloonTip(5000, 'Proton Drive sync', "Could not request a sync: $($_.Exception.Message)", [System.Windows.Forms.ToolTipIcon]::Error)
+        return
+    }
+    Update-RcloneSyncRequested
+}
+$global:RcloneSyncRequested = Test-Path "$Root\sync-now"
 function global:Get-RcloneStats {
     try {
         $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
@@ -380,12 +402,14 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $f = $global:RcloneTrayPopup
     if (-not $f.Visible -and -not $Force) { return }
     $c = $global:PopupCtl
-    $syncing = $global:RcloneSyncing
+    $requested = (Test-Path "$($global:RcloneTrayRoot)\sync-now") -and -not $global:RcloneSyncing
+    $syncing = $global:RcloneSyncing -or $requested
     $failed = (-not $syncing) -and $global:RcloneLastError
     $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
-    $c.State.Text = if ($syncing) { 'Syncing...' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
+    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { 'Syncing...' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
     $c.Since.Visible = $syncing
-    if ($syncing) { $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)" }
+    if ($requested) { $c.Since.Text = 'Waiting for the service to start the run' }
+    elseif ($syncing) { $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)" }
     $s = $global:RcloneStats
     $showStats = $syncing -and $s
     $showBar = $showStats -and $s.totalBytes -gt 0
@@ -405,6 +429,7 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $c.LastOk.Text = "Last successful sync: $(Format-Ago $global:RcloneLastOk)"
     $c.Error.Visible = [bool]$failed
     $c.Error.Text = $global:RcloneLastError
+    $c.Sync.Text = if ($requested) { 'Starting...' } else { 'Sync now' }
     $c.Sync.Cursor = if ($syncing) { "Default" } else { "Hand" }
     $c.Sync.BackColor = if ($syncing) { $global:PopupTrack } else { $global:PopupAccent }
     $c.Sync.ForeColor = if ($syncing) { $global:PopupDim } else { [System.Drawing.Color]::White }
@@ -445,6 +470,10 @@ $watcher = New-Object System.IO.FileSystemWatcher (Split-Path $LogFile), (Split-
 $watcher.NotifyFilter = [System.IO.NotifyFilters]'LastWrite, Size'
 Register-ObjectEvent $watcher Changed -Action { Read-RcloneTrayNewLines } | Out-Null
 $watcher.EnableRaisingEvents = $true
+$triggerWatcher = New-Object System.IO.FileSystemWatcher $Root, 'sync-now'
+$triggerWatcher.NotifyFilter = [System.IO.NotifyFilters]'FileName'
+foreach ($ev in 'Created', 'Deleted', 'Renamed') { Register-ObjectEvent $triggerWatcher $ev -Action { Update-RcloneSyncRequested } | Out-Null }
+$triggerWatcher.EnableRaisingEvents = $true
 
 # Theme switches: re-theme the tray icons and popup in place when the light/dark or accent
 # setting changes. Event-driven (WM_SETTINGCHANGE via SystemEvents), no polling.
