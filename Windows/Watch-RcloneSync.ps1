@@ -433,7 +433,7 @@ function global:Get-RcloneStats {
 # estimate for how many files the current run will check.
 $global:RcloneStateFile = "$Root\tray-state.json"
 $global:RcloneRunHistory = @()
-try { $global:RcloneRunHistory = @((Get-Content $global:RcloneStateFile -Raw | ConvertFrom-Json).runs) } catch { }
+try { $global:RcloneRunHistory = @((Get-Content $global:RcloneStateFile -Raw -ErrorAction Stop | ConvertFrom-Json).runs) } catch { }
 $global:RcloneRunStartChecks = $null
 function global:Get-RcloneExpectedChecks {
     $h = @($global:RcloneRunHistory | ForEach-Object { $_.checks } | Where-Object { $_ -gt 0 } | Sort-Object)
