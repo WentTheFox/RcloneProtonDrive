@@ -1,0 +1,21 @@
+[Unit]
+Description=Two-way sync of Proton Drive with /mnt/d/ProtonDrive (rclone bisync)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+# RCLONE_RC_USER / RCLONE_RC_PASS for the web UI (keep out of the unit file itself)
+EnvironmentFile=-%h/.config/rclone-protondrive/rc.env
+ExecStartPre=-%h/.local/bin/rclone-protondrive-status syncing
+# Never sync into /mnt/d/ProtonDrive if /mnt/d isn't mounted (it would land on the root disk)
+ExecStartPre=/usr/bin/mountpoint -q /mnt/d
+ExecStartPre=/usr/bin/mkdir -p /mnt/d/ProtonDrive
+ExecStart=/usr/bin/rclone bisync ProtonDrive: /mnt/d/ProtonDrive \
+    --create-empty-src-dirs --resilient --recover --max-lock 2m \
+    --conflict-resolve newer --max-delete 25 --stats 1m -v \
+    --rc --rc-addr localhost:5573 \
+    --rc-web-gui --rc-web-gui-no-open-browser
+# Runs on success and failure; SERVICE_RESULT / EXIT_STATUS tell the helper which
+ExecStopPost=-%h/.local/bin/rclone-protondrive-status finished

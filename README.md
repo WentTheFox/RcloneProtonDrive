@@ -137,4 +137,22 @@ All of this lives under `Windows/`.
 
 ## Linux setup
 
-See the sibling folder next to this one.
+All of this lives under `Linux/`. It uses systemd user units (bisync every 15
+minutes, rclone's web UI on `http://localhost:5573`) plus a KDE Plasma 6
+widget that shows sync status and errors.
+
+1. Create the `ProtonDrive` remote with `rclone config` (same notes as the
+   Windows steps, including `replace_existing_draft = true`).
+2. Run `Linux/install.sh`. It installs the units and the status helper, creates
+   `~/.config/rclone-protondrive/rc.env` (web-UI login, mode 600) if missing,
+   enables the timer, and installs the plasmoid.
+3. Add the **Proton Drive Sync** widget to a panel.
+
+The sync unit calls `rclone-protondrive-status` before and after each run, which
+writes `$XDG_RUNTIME_DIR/rclone-protondrive/status.json`. The widget blocks on an
+inotify watcher (no polling), so it updates the moment a run starts or ends. It
+shows syncing / up to date / failed, the last successful sync time, and the last
+error lines from the journal; right-click offers **Sync now** and **Open web UI**.
+
+`rclone-protondrive-download.service` is a one-shot initial `rclone copy` that
+disables itself once a clean pass finishes.

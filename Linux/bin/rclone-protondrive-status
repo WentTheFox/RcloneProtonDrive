@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Writes the sync status file the plasmoid watches.
+
+Usage: rclone-protondrive-status syncing
+       rclone-protondrive-status finished   (reads SERVICE_RESULT/EXIT_STATUS from systemd)
+"""
+import json, os, subprocess, sys, time
+
+UNIT = "rclone-protondrive-sync.service"
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+PATH = os.path.join(RUNTIME, "rclone-protondrive", "status.json")
+
+
+def read():
+    try:
+        with open(PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write(d):
+    os.makedirs(os.path.dirname(PATH), exist_ok=True)
+    tmp = PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, PATH)  # atomic rename -> one inotify event for the watcher
+
+
+def recent_errors():
+    # Only this run's log lines (systemd sets INVOCATION_ID for ExecStopPost too)
+    inv = os.environ.get("INVOCATION_ID")
+    cmd = ["journalctl", "--user", "-u", UNIT, "-o", "cat", "--no-pager", "-n", "400"]
+    if inv:
+        cmd.append(f"_SYSTEMD_INVOCATION_ID={inv}")
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout.splitlines()
+    errs = [l for l in out if "ERROR" in l or "CRITICAL" in l or "Bisync critical error" in l or "Failed" in l]
+    return errs[-5:]
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    now = int(time.time())
+    prev = read()
+    if mode == "syncing":
+        write({"state": "syncing", "since": now, "lastOk": prev.get("lastOk"), "lastResult": prev.get("lastResult"),
+               "errors": [], "message": ""})
+    elif mode == "finished":
+        result = os.environ.get("SERVICE_RESULT", "unknown")
+        code = os.environ.get("EXIT_STATUS", "")
+        if result == "success":
+            write({"state": "idle", "since": now, "lastOk": now, "lastResult": "success", "errors": [], "message": ""})
+        else:
+            errs = recent_errors()
+            msg = errs[-1] if errs else f"{result} (exit {code})"
+            write({"state": "error", "since": now, "lastOk": prev.get("lastOk"), "lastResult": result,
+                   "errors": errs, "message": msg})
+    else:
+        sys.exit(__doc__)
+
+
+main()

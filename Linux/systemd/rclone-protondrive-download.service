@@ -1,0 +1,20 @@
+[Unit]
+Description=One-way download of Proton Drive to /mnt/d/ProtonDrive (rclone copy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+EnvironmentFile=-%h/.config/rclone-protondrive/rc.env
+ExecStartPre=/usr/bin/mountpoint -q /mnt/d
+ExecStartPre=/usr/bin/mkdir -p /mnt/d/ProtonDrive
+# Disables itself once a full pass finishes without errors, so it resumes after reboots until done
+ExecStart=/bin/bash -c '/usr/bin/rclone copy ProtonDrive: /mnt/d/ProtonDrive \
+    --create-empty-src-dirs --stats 1m -v \
+    --rc --rc-addr localhost:5573 \
+    --rc-web-gui --rc-web-gui-no-open-browser \
+  && systemctl --user disable rclone-protondrive-download.service'
+
+[Install]
+WantedBy=default.target

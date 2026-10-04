@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Blocks until a file in the given directory is created/replaced, then exits.
+Event-driven (inotify), no polling. Usage: wait-for-change <dir>"""
+import ctypes, os, struct, sys
+
+d = sys.argv[1]
+os.makedirs(d, exist_ok=True)
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+IN_CLOSE_WRITE, IN_MOVED_TO, IN_CREATE = 0x8, 0x80, 0x100
+fd = libc.inotify_init()
+if libc.inotify_add_watch(fd, d.encode(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0:
+    sys.exit("inotify_add_watch failed")
+os.read(fd, 4096)
