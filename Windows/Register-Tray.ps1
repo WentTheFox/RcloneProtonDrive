@@ -1,15 +1,17 @@
 # Deploys Watch-RcloneSync.ps1 to C:\ProgramData\rclone and registers it as a
 # per-user logon scheduled task (tray icons need an interactive desktop
 # session, so this can't run inside the LocalSystem rclone-proton service).
-# Safe to re-run.
+# The task launches via wscript + Launch-Tray.vbs so no console window ever
+# flashes (powershell.exe -WindowStyle Hidden still does). Safe to re-run.
 $Root = 'C:\ProgramData\rclone'
 $Here = $PSScriptRoot
 $TaskName = 'RcloneProtonTray'
 
 Copy-Item "$Here\Watch-RcloneSync.ps1" "$Root\Watch-RcloneSync.ps1" -Force
+Copy-Item "$Here\Launch-Tray.vbs" "$Root\Launch-Tray.vbs" -Force
 
-$ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -WindowStyle Hidden -File `"$Root\Watch-RcloneSync.ps1`""
+$wscript = "$env:SystemRoot\System32\wscript.exe"
+$action = New-ScheduledTaskAction -Execute $wscript -Argument "`"$Root\Launch-Tray.vbs`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
 

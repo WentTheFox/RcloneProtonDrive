@@ -5,6 +5,11 @@
 # sync can't silently sit broken for days the way it did before this existed.
 # Run via Register-Tray.ps1 (logon scheduled task), or manually:
 #   powershell -NoProfile -WindowStyle Hidden -File Watch-RcloneSync.ps1
+# Detach from the console so no PowerShell window lingers (and closing one
+# can't kill the tray icon). -WindowStyle Hidden alone still flashes a window.
+Add-Type -Namespace Win32 -Name Console -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool FreeConsole();'
+[Win32.Console]::FreeConsole() | Out-Null
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
