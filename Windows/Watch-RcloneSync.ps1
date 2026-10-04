@@ -561,3 +561,7 @@ $global:RcloneThemeWatcher = New-Object ThemeWatcher $form, ([Action]{
 })
 
 [System.Windows.Forms.Application]::Run()
+
+# Remove the icon on any way out so no ghost is left in the tray until the mouse passes over it
+$notify.Visible = $false
+$notify.Dispose()
