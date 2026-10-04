@@ -55,7 +55,9 @@ PlasmoidItem {
     property bool running: false
     readonly property string effectiveState: running ? "syncing" : status.state
 
-    // Lucide icons (see README), coloured and staged into contents/icons by install.sh
+    // Lucide icons (see README), staged into contents/icons by install.sh. The neutral
+    // one is uncoloured and masked with the theme text colour so it reads on light and dark.
+    readonly property bool iconIsMask: ["syncing", "idle", "error"].indexOf(effectiveState) < 0
     readonly property string iconName: {
         switch (effectiveState) {
         case "syncing": return Qt.resolvedUrl("../icons/syncing.svg")
@@ -142,6 +144,8 @@ PlasmoidItem {
         Kirigami.Icon {
             anchors.fill: parent
             source: root.iconName
+            isMask: root.iconIsMask
+            color: Kirigami.Theme.textColor
         }
     }
 
@@ -152,7 +156,7 @@ PlasmoidItem {
 
         RowLayout {
             spacing: Kirigami.Units.largeSpacing
-            Kirigami.Icon { source: root.iconName; implicitWidth: Kirigami.Units.iconSizes.large; implicitHeight: implicitWidth }
+            Kirigami.Icon { source: root.iconName; isMask: root.iconIsMask; color: Kirigami.Theme.textColor; implicitWidth: Kirigami.Units.iconSizes.large; implicitHeight: implicitWidth }
             ColumnLayout {
                 spacing: 0
                 Layout.fillWidth: true

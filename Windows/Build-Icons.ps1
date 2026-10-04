@@ -14,7 +14,9 @@ $icons = @{
     synced  = @('cloud-check', '#2eb85c')
     syncing = @('cloud-sync',  '#3b82f6')
     error   = @('cloud-alert', '#e5484d')
-    idle    = @('cloud',       '#8b8b8b')
+    # Neutral state follows the theme: white on dark, near-black on light
+    'idle-white' = @('cloud', '#ffffff')
+    'idle-black' = @('cloud', '#1a1a1a')
 }
 $size = 64
 New-Item -ItemType Directory -Force $Out | Out-Null

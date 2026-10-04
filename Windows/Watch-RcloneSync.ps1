@@ -31,7 +31,8 @@ function New-PngIcon([string]$name) {
 $iconOk      = New-PngIcon 'synced'
 $iconBad     = New-PngIcon 'error'
 $iconSyncing = New-PngIcon 'syncing'
-$iconIdle    = New-PngIcon 'idle'
+$taskbarLight = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue).SystemUsesLightTheme -eq 1
+$iconIdle    = New-PngIcon $(if ($taskbarLight) { 'idle-black' } else { 'idle-white' })
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Icon = $iconIdle
 $notify.Text = 'Proton Drive sync: starting up'
@@ -236,7 +237,7 @@ $lblTitle = New-PopupLabel $fontSmall $cDim 0 0 $titleCol
 $lblTitle.Text = 'Proton Drive sync'
 $lblState = New-PopupLabel $fontTitle $cFg 0 0 $titleCol
 $global:PopupImages = @{}
-foreach ($n in 'synced', 'syncing', 'error', 'idle') { $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$Root\icons\$n.png") }
+foreach ($n in 'synced', 'syncing', 'error', 'idle-white', 'idle-black') { $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$Root\icons\$n.png") }
 $lblSince = New-PopupLabel $fontSmall $cDim 0 16
 $barTrack = New-Object System.Windows.Forms.Panel
 $barTrack.Size = New-Object System.Drawing.Size $contentWidth, 4
@@ -286,7 +287,7 @@ function global:Update-RcloneTrayPopup {
     $c = $global:PopupCtl
     $syncing = $global:RcloneSyncing
     $failed = (-not $syncing) -and $global:RcloneLastError
-    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
+    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { $(if ($light) { 'idle-black' } else { 'idle-white' }) } )]
     $c.State.Text = if ($syncing) { 'Syncing...' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
     $c.Since.Visible = $syncing
     if ($syncing) { $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)" }

@@ -30,7 +30,8 @@ icon() { sed "s/currentColor/$3/" "$lucide/$1.svg" > "$pkg/contents/icons/$2.svg
 icon cloud-check synced '#2eb85c'
 icon cloud-sync syncing '#3b82f6'
 icon cloud-alert error '#e5484d'
-icon cloud idle '#8b8b8b'
+# Neutral icon keeps currentColor; the widget masks it with the Plasma text colour
+cp "$lucide/cloud.svg" "$pkg/contents/icons/idle.svg"
 
 kpackagetool6 -t Plasma/Applet -u "$pkg" 2>/dev/null \
     || kpackagetool6 -t Plasma/Applet -i "$pkg"
