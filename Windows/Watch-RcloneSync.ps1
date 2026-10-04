@@ -52,7 +52,16 @@ function New-PngIcon([string]$name) {
     $g.Dispose(); $src.Dispose()
     [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
-$taskbarLight = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue).SystemUsesLightTheme -eq 1
+# Theme state is read exactly once, here, and drives the tray icons, popup colours and the
+# change check below, so they can never disagree with each other.
+function global:Get-RcloneThemeKey {
+    $p = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue
+    $d = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\DWM' -ErrorAction SilentlyContinue
+    "$($p.SystemUsesLightTheme)/$($p.AppsUseLightTheme)/$($d.AccentColor)"
+}
+$global:RcloneThemeKey = Get-RcloneThemeKey
+$themeParts = $global:RcloneThemeKey -split '/'
+$taskbarLight = $themeParts[0] -eq '1'
 $tbSuffix = if ($taskbarLight) { 'black' } else { 'white' }
 $iconOk      = New-PngIcon "synced-$tbSuffix"
 $iconBad     = New-PngIcon "error-$tbSuffix"
@@ -183,8 +192,8 @@ function Get-RegValue($path, $name, $default) {
     try { $v = (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name; if ($null -ne $v) { return $v } } catch { }
     $default
 }
-$light = (Get-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'AppsUseLightTheme' 0) -eq 1
-$abgr = [uint32](Get-RegValue 'HKCU:\Software\Microsoft\Windows\DWM' 'AccentColor' 0xFFD47800)
+$light = $themeParts[1] -eq '1'
+$abgr = if ($themeParts[2]) { [uint32]$themeParts[2] } else { [uint32]0xFFD47800 }
 $accent = [System.Drawing.Color]::FromArgb($abgr -band 0xFF, ($abgr -shr 8) -band 0xFF, ($abgr -shr 16) -band 0xFF)
 if ($light) {
     $cBg = [System.Drawing.Color]::FromArgb(249, 249, 249); $cFg = [System.Drawing.Color]::FromArgb(26, 26, 26)
@@ -377,11 +386,6 @@ $watcher.EnableRaisingEvents = $true
 
 # Theme switches: icons and popup colours are chosen at startup, so relaunch when
 # the light/dark setting changes. Event-driven (WM_SETTINGCHANGE via SystemEvents), no polling.
-function global:Get-RcloneThemeKey {
-    $p = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue
-    "$($p.SystemUsesLightTheme)/$($p.AppsUseLightTheme)"
-}
-$global:RcloneThemeKey = Get-RcloneThemeKey
 function global:Restart-RcloneTray {
     # A theme change raises several events; only the first may spawn a replacement
     if ($global:RcloneRestarting) { return }
@@ -391,9 +395,16 @@ function global:Restart-RcloneTray {
     [System.Windows.Forms.Application]::Exit()
 }
 $null = $form.Handle  # make sure the popup form has a handle to marshal onto
-$global:RcloneThemeWatcher = New-Object ThemeWatcher $form, ([Action]{
-    Start-Sleep -Milliseconds 500  # let the registry write settle
+# Windows writes the taskbar/app/accent values one after another and raises several events,
+# so debounce: only compare once things have been quiet for a moment.
+$global:RcloneThemeDebounce = New-Object System.Windows.Forms.Timer
+$global:RcloneThemeDebounce.Interval = 1500
+$global:RcloneThemeDebounce.Add_Tick({
+    $global:RcloneThemeDebounce.Stop()
     if ((Get-RcloneThemeKey) -ne $global:RcloneThemeKey) { Restart-RcloneTray }
+})
+$global:RcloneThemeWatcher = New-Object ThemeWatcher $form, ([Action]{
+    $global:RcloneThemeDebounce.Stop(); $global:RcloneThemeDebounce.Start()
 })
 
 [System.Windows.Forms.Application]::Run()
