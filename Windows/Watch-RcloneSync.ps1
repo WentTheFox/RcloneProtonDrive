@@ -52,25 +52,42 @@ $menu.Items.Add('-') | Out-Null
 $itemExit = $menu.Items.Add('Exit')
 $itemExit.Add_Click({ $notify.Visible = $false; [System.Windows.Forms.Application]::Exit() })
 $notify.ContextMenuStrip = $menu
-$notify.Add_DoubleClick({ Start-Process (Get-WebGuiUrl) })
+$notify.Add_MouseClick({ if ($_.Button -eq 'Left') { Toggle-RcloneTrayPopup } })
 
 $global:RcloneTrayNotify = $notify
+$global:RcloneTrayIconWarn = $iconWarn
+$global:RcloneTrayRoot = $Root
+$global:RcloneSyncing = $false
+$global:RcloneSyncSince = $null
+$global:RcloneLastOk = $null
+$global:RcloneLastError = ''
+$global:RcloneStats = $null
 $global:RcloneTrayIconOk = $iconOk
 $global:RcloneTrayIconBad = $iconBad
 $global:RcloneTrayLogFile = $LogFile
 $global:consecutiveFailures = 0
 $global:lastOffset = 0
 
-function global:Update-RcloneTrayStatus([string]$state, [string]$detail) {
+function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when = (Get-Date)) {
     $stamp = Get-Date -Format 'HH:mm:ss'
+    $global:RcloneSyncing = ($state -eq 'start')
     switch ($state) {
+        'start' {
+            $global:RcloneSyncSince = $when
+            $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconWarn
+            $text = "Proton Drive sync: syncing ($stamp)"
+            $global:RcloneTrayNotify.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
+        }
         'ok' {
+            $global:RcloneLastOk = $when
+            $global:RcloneLastError = ''
             $global:consecutiveFailures = 0
             $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconOk
             $text = "Proton Drive sync: OK ($stamp)"
             $global:RcloneTrayNotify.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
         }
         'fail' {
+            $global:RcloneLastError = $detail
             $global:consecutiveFailures++
             $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconBad
             $text = "Proton Drive sync: FAILED x$($global:consecutiveFailures) (last $stamp)"
@@ -94,10 +111,204 @@ function global:Read-RcloneTrayNewLines {
         $global:lastOffset = $fs.Position
         $sr.Close(); $fs.Close()
         foreach ($line in ($text -split "`r?`n")) {
-            if ($line -match 'sync FAILED:\s*(.*)$') { Update-RcloneTrayStatus 'fail' $Matches[1] }
-            elseif ($line -match 'sync finished') { Update-RcloneTrayStatus 'ok' '' }
+            $when = Get-Date
+            if ($line -match '^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)') { $when = [datetime]::Parse($Matches[1]) }
+            if ($line -match 'sync FAILED:\s*(.*)$') { Update-RcloneTrayStatus 'fail' $Matches[1] $when }
+            elseif ($line -match 'sync finished') { Update-RcloneTrayStatus 'ok' '' $when }
+            elseif ($line -match 'sync starting') { Update-RcloneTrayStatus 'start' '' $when }
         }
     } catch { }
+    Update-RcloneTrayPopup
+}
+
+# --- Status popup (left-click the tray icon) --------------------------------
+# rc has no push API, so live transfer stats are fetched once a second, but
+# only while the popup is open and a sync is running.
+function global:Format-Bytes([double]$b) {
+    $u = 'B', 'KiB', 'MiB', 'GiB', 'TiB'; $i = 0
+    while ($b -ge 1024 -and $i -lt $u.Count - 1) { $b /= 1024; $i++ }
+    ('{0:N1} {1}' -f $b, $u[$i]) -replace '\.0 B$', ' B'
+}
+function global:Format-Duration([double]$s) {
+    $t = [TimeSpan]::FromSeconds([Math]::Round($s))
+    if ($t.TotalHours -ge 1) { '{0}h {1}m {2}s' -f [int]$t.TotalHours, $t.Minutes, $t.Seconds }
+    elseif ($t.TotalMinutes -ge 1) { '{0}m {1}s' -f $t.Minutes, $t.Seconds }
+    else { '{0}s' -f $t.Seconds }
+}
+function global:Format-Ago($d) {
+    if (-not $d) { return 'never' }
+    $s = ((Get-Date) - $d).TotalSeconds
+    if ($s -lt 60) { 'just now' } elseif ($s -lt 3600) { "$([int]($s / 60)) min ago" }
+    elseif ($s -lt 86400) { "$([int]($s / 3600)) h ago" } else { "$([int]($s / 86400)) d ago" }
+}
+
+# Win11 look: follow the system light/dark setting and accent colour, rounded
+# corners + shadow + hairline border via DWM, flat controls, Segoe UI.
+Add-Type -Namespace Win32 -Name Dwm -MemberDefinition @'
+[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+[StructLayout(LayoutKind.Sequential)] public struct MARGINS { public int l, r, t, b; }
+[DllImport("dwmapi.dll")] public static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS m);
+'@
+function Get-RegValue($path, $name, $default) {
+    try { $v = (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name; if ($null -ne $v) { return $v } } catch { }
+    $default
+}
+$light = (Get-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'AppsUseLightTheme' 0) -eq 1
+$abgr = [uint32](Get-RegValue 'HKCU:\Software\Microsoft\Windows\DWM' 'AccentColor' 0xFFD47800)
+$accent = [System.Drawing.Color]::FromArgb($abgr -band 0xFF, ($abgr -shr 8) -band 0xFF, ($abgr -shr 16) -band 0xFF)
+if ($light) {
+    $cBg = [System.Drawing.Color]::FromArgb(249, 249, 249); $cFg = [System.Drawing.Color]::FromArgb(26, 26, 26)
+    $cDim = [System.Drawing.Color]::FromArgb(96, 96, 96); $cTrack = [System.Drawing.Color]::FromArgb(215, 215, 215)
+    $cBorder = [System.Drawing.Color]::FromArgb(205, 205, 205)
+} else {
+    $cBg = [System.Drawing.Color]::FromArgb(43, 43, 43); $cFg = [System.Drawing.Color]::FromArgb(255, 255, 255)
+    $cDim = [System.Drawing.Color]::FromArgb(171, 171, 171); $cTrack = [System.Drawing.Color]::FromArgb(70, 70, 70)
+    $cBorder = [System.Drawing.Color]::FromArgb(70, 70, 70)
+}
+$cErr = if ($light) { [System.Drawing.Color]::FromArgb(196, 43, 28) } else { [System.Drawing.Color]::FromArgb(255, 153, 164) }
+$fontBody = New-Object System.Drawing.Font 'Segoe UI Variable Text', 9.5
+$fontSmall = New-Object System.Drawing.Font 'Segoe UI Variable Small', 9
+$fontTitle = New-Object System.Drawing.Font 'Segoe UI Variable Display Semibold', 13
+$contentWidth = 330
+
+$form = New-Object System.Windows.Forms.Form
+$form.FormBorderStyle = 'None'
+$form.ShowInTaskbar = $false
+$form.TopMost = $true
+$form.StartPosition = 'Manual'
+$form.BackColor = $cBg
+$form.ForeColor = $cFg
+$form.Font = $fontBody
+$form.AutoSize = $true
+$form.AutoSizeMode = 'GrowAndShrink'
+$form.Padding = New-Object System.Windows.Forms.Padding 28, 26, 28, 28
+$form.Add_HandleCreated({
+    $h = $this.Handle
+    $v = if ($light) { 0 } else { 1 }; [Win32.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$v, 4) | Out-Null  # dark mode
+    $v = 2; [Win32.Dwm]::DwmSetWindowAttribute($h, 33, [ref]$v, 4) | Out-Null                              # rounded corners
+    $v = $cBorder.B * 65536 + $cBorder.G * 256 + $cBorder.R; [Win32.Dwm]::DwmSetWindowAttribute($h, 34, [ref]$v, 4) | Out-Null  # border colour
+    $m = New-Object Win32.Dwm+MARGINS; $m.l = 1; $m.r = 1; $m.t = 1; $m.b = 1                             # drop shadow
+    [Win32.Dwm]::DwmExtendFrameIntoClientArea($h, [ref]$m) | Out-Null
+})
+
+$panel = New-Object System.Windows.Forms.FlowLayoutPanel
+$panel.FlowDirection = 'TopDown'
+$panel.WrapContents = $false
+$panel.AutoSize = $true
+$panel.BackColor = $cBg
+$panel.Location = New-Object System.Drawing.Point $form.Padding.Left, $form.Padding.Top
+$form.Controls.Add($panel)
+
+function New-PopupLabel($font = $fontBody, $color = $cFg, [int]$top = 0, [int]$bottom = 10) {
+    $l = New-Object System.Windows.Forms.Label
+    $l.AutoSize = $true
+    $l.Font = $font
+    $l.ForeColor = $color
+    $l.BackColor = $cBg
+    $l.MaximumSize = New-Object System.Drawing.Size $contentWidth, 0
+    $l.Margin = New-Object System.Windows.Forms.Padding 0, $top, 0, $bottom
+    $panel.Controls.Add($l)
+    $l
+}
+$lblState = New-PopupLabel $fontTitle $cFg 0 4
+$lblSince = New-PopupLabel $fontSmall $cDim 0 16
+$barTrack = New-Object System.Windows.Forms.Panel
+$barTrack.Size = New-Object System.Drawing.Size $contentWidth, 4
+$barTrack.BackColor = $cTrack
+$barTrack.Margin = New-Object System.Windows.Forms.Padding 0, 6, 0, 12
+$bar = New-Object System.Windows.Forms.Panel
+$bar.Dock = 'Left'
+$bar.Width = 0
+$bar.BackColor = $accent
+$barTrack.Controls.Add($bar)
+$panel.Controls.Add($barTrack)
+$lblBytes = New-PopupLabel $fontBody $cFg 0 4
+$lblCounts = New-PopupLabel $fontSmall $cDim 0 10
+$lblFiles = New-PopupLabel $fontSmall $cDim 0 10
+$lblLastOk = New-PopupLabel $fontSmall $cDim 0 10
+$lblError = New-PopupLabel $fontSmall $cErr 0 12
+$btnSync = New-Object System.Windows.Forms.Button
+$btnSync.Text = 'Sync now'
+$btnSync.FlatStyle = 'Flat'
+$btnSync.FlatAppearance.BorderSize = 0
+$btnSync.Font = $fontBody
+$btnSync.Size = New-Object System.Drawing.Size $contentWidth, 34
+$btnSync.Margin = New-Object System.Windows.Forms.Padding 0, 14, 0, 0
+$btnSync.Cursor = 'Hand'
+$btnSync.UseVisualStyleBackColor = $false
+$btnSync.Add_Click({ if ($global:RcloneSyncing) { return }; New-Item -ItemType File -Force "$($global:RcloneTrayRoot)\sync-now" | Out-Null; $global:RcloneTrayPopup.Hide() })
+$panel.Controls.Add($btnSync)
+$global:PopupAccent = $accent; $global:PopupTrack = $cTrack; $global:PopupDim = $cDim; $global:PopupFg = $cFg
+
+$global:RcloneTrayPopup = $form
+$global:RcloneTrayPopupHiddenAt = [datetime]::MinValue
+$global:PopupCtl = @{ State = $lblState; Since = $lblSince; Bar = $bar; BarTrack = $barTrack; Bytes = $lblBytes; Counts = $lblCounts
+                      Files = $lblFiles; LastOk = $lblLastOk; Error = $lblError; Sync = $btnSync }
+
+function global:Get-RcloneStats {
+    try {
+        $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
+        $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
+        $global:RcloneStats = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5572/core/stats' `
+            -Headers @{ Authorization = $basic } -TimeoutSec 2
+    } catch { }  # keep the last snapshot rather than flicker
+}
+
+function global:Update-RcloneTrayPopup {
+    $f = $global:RcloneTrayPopup
+    if (-not $f.Visible) { return }
+    $c = $global:PopupCtl
+    $syncing = $global:RcloneSyncing
+    $failed = (-not $syncing) -and $global:RcloneLastError
+    $c.State.Text = if ($syncing) { 'Syncing...' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
+    $c.Since.Visible = $syncing
+    if ($syncing) { $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)" }
+    $s = $global:RcloneStats
+    $showStats = $syncing -and $s
+    $showBar = $showStats -and $s.totalBytes -gt 0
+    $c.BarTrack.Visible = $showBar
+    $c.Bytes.Visible = $showBar
+    if ($showBar) {
+        $c.Bar.Width = [int]($c.BarTrack.Width * [Math]::Min(1.0, $s.bytes / [Math]::Max(1, $s.totalBytes)))
+        $eta = if ($s.eta) { ", ETA $(Format-Duration $s.eta)" } else { '' }
+        $c.Bytes.Text = "$(Format-Bytes $s.bytes) / $(Format-Bytes $s.totalBytes) at $(Format-Bytes $s.speed)/s$eta"
+    }
+    $c.Counts.Visible = $showStats
+    $c.Files.Visible = $showStats -and $s.transferring
+    if ($showStats) {
+        $c.Counts.Text = "Checked $($s.checks) files, $($s.transfers) transfers, elapsed $(Format-Duration $s.elapsedTime)"
+        if ($s.transferring) { $c.Files.Text = (($s.transferring | ForEach-Object { "$($_.name) ($($_.percentage)%)" }) -join "`n") }
+    }
+    $c.LastOk.Text = "Last successful sync: $(Format-Ago $global:RcloneLastOk)"
+    $c.Error.Visible = [bool]$failed
+    $c.Error.Text = $global:RcloneLastError
+    $c.Sync.Cursor = if ($syncing) { "Default" } else { "Hand" }
+    $c.Sync.BackColor = if ($syncing) { $global:PopupTrack } else { $global:PopupAccent }
+    $c.Sync.ForeColor = if ($syncing) { $global:PopupDim } else { [System.Drawing.Color]::White }
+    $f.Timer.Enabled = $syncing
+}
+
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 1000
+$timer.Add_Tick({ Get-RcloneStats; Update-RcloneTrayPopup })
+$form | Add-Member -NotePropertyName Timer -NotePropertyValue $timer
+
+$form.Add_Deactivate({ $global:RcloneTrayPopupHiddenAt = Get-Date; $this.Hide(); $this.Timer.Enabled = $false })
+$form.Add_SizeChanged({
+    if ($this.Visible) {
+        $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+        $this.Location = New-Object System.Drawing.Point ($wa.Right - $this.Width - 8), ($wa.Bottom - $this.Height - 8)
+    }
+})
+
+function global:Toggle-RcloneTrayPopup {
+    $f = $global:RcloneTrayPopup
+    # The click that dismisses the popup arrives right after Deactivate hid it; don't reopen
+    if ($f.Visible -or ((Get-Date) - $global:RcloneTrayPopupHiddenAt).TotalMilliseconds -lt 300) { $f.Hide(); return }
+    $f.Show()
+    Update-RcloneTrayPopup
+    $f.Activate()
+    if ($global:RcloneSyncing) { Get-RcloneStats; Update-RcloneTrayPopup }
 }
 
 # Prime from whatever's already in the log so the icon isn't a guess at startup.
