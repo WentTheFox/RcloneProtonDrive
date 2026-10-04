@@ -41,7 +41,7 @@ $Root = 'C:\ProgramData\rclone'
 $LogFile = "$Root\service.log"
 
 # Icons are rendered from the Lucide submodule by Build-Icons.ps1 (called from Register-Tray.ps1).
-function New-PngIcon([string]$name) {
+function global:New-PngIcon([string]$name) {
     $src = [System.Drawing.Image]::FromFile("$Root\icons\$name.png")
     $size = [System.Windows.Forms.SystemInformation]::SmallIconSize
     $bmp = New-Object System.Drawing.Bitmap $size.Width, $size.Height
@@ -103,6 +103,7 @@ $global:RcloneLastError = ''
 $global:RcloneStats = $null
 $global:RcloneTrayIconOk = $iconOk
 $global:RcloneTrayIconBad = $iconBad
+$global:RcloneTrayIconIdle = $iconIdle
 $global:RcloneTrayLogFile = $LogFile
 $global:consecutiveFailures = 0
 $global:lastOffset = 0
@@ -192,19 +193,28 @@ function Get-RegValue($path, $name, $default) {
     try { $v = (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name; if ($null -ne $v) { return $v } } catch { }
     $default
 }
-$light = $themeParts[1] -eq '1'
-$abgr = if ($themeParts[2]) { [uint32]$themeParts[2] } else { [uint32]0xFFD47800 }
-$accent = [System.Drawing.Color]::FromArgb($abgr -band 0xFF, ($abgr -shr 8) -band 0xFF, ($abgr -shr 16) -band 0xFF)
-if ($light) {
-    $cBg = [System.Drawing.Color]::FromArgb(249, 249, 249); $cFg = [System.Drawing.Color]::FromArgb(26, 26, 26)
-    $cDim = [System.Drawing.Color]::FromArgb(96, 96, 96); $cTrack = [System.Drawing.Color]::FromArgb(215, 215, 215)
-    $cBorder = [System.Drawing.Color]::FromArgb(205, 205, 205)
-} else {
-    $cBg = [System.Drawing.Color]::FromArgb(43, 43, 43); $cFg = [System.Drawing.Color]::FromArgb(255, 255, 255)
-    $cDim = [System.Drawing.Color]::FromArgb(171, 171, 171); $cTrack = [System.Drawing.Color]::FromArgb(70, 70, 70)
-    $cBorder = [System.Drawing.Color]::FromArgb(70, 70, 70)
+function global:Get-RclonePalette([string]$key) {
+    $parts = $key -split '/'
+    $light = $parts[1] -eq '1'
+    $abgr = if ($parts[2]) { [uint32]$parts[2] } else { [uint32]0xFFD47800 }
+    $c = { param($r, $g, $b) [System.Drawing.Color]::FromArgb($r, $g, $b) }
+    $p = @{
+        TaskbarLight = $parts[0] -eq '1'; Light = $light
+        Accent = & $c ($abgr -band 0xFF) (($abgr -shr 8) -band 0xFF) (($abgr -shr 16) -band 0xFF)
+    }
+    if ($light) {
+        $p.Bg = & $c 249 249 249; $p.Fg = & $c 26 26 26; $p.Dim = & $c 96 96 96; $p.Track = & $c 215 215 215
+        $p.Border = & $c 205 205 205; $p.Err = & $c 196 43 28
+    } else {
+        $p.Bg = & $c 43 43 43; $p.Fg = & $c 255 255 255; $p.Dim = & $c 171 171 171; $p.Track = & $c 70 70 70
+        $p.Border = & $c 70 70 70; $p.Err = & $c 255 153 164
+    }
+    $p
 }
-$cErr = if ($light) { [System.Drawing.Color]::FromArgb(196, 43, 28) } else { [System.Drawing.Color]::FromArgb(255, 153, 164) }
+$global:RclonePal = Get-RclonePalette $global:RcloneThemeKey
+$light = $global:RclonePal.Light; $accent = $global:RclonePal.Accent
+$cBg = $global:RclonePal.Bg; $cFg = $global:RclonePal.Fg; $cDim = $global:RclonePal.Dim
+$cTrack = $global:RclonePal.Track; $cBorder = $global:RclonePal.Border; $cErr = $global:RclonePal.Err
 $fontBody = New-Object System.Drawing.Font 'Segoe UI Variable Text', 9.5
 $fontSmall = New-Object System.Drawing.Font 'Segoe UI Variable Small', 9
 $fontTitle = New-Object System.Drawing.Font 'Segoe UI Variable Display Semibold', 13
@@ -221,15 +231,15 @@ $form.Font = $fontBody
 $form.AutoSize = $true
 $form.AutoSizeMode = 'GrowAndShrink'
 $form.Padding = New-Object System.Windows.Forms.Padding 28, 26, 28, 28
-$form.Add_HandleCreated({
-    $h = $this.Handle
-    $v = if ($light) { 0 } else { 1 }; [Win32.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$v, 4) | Out-Null  # dark mode
+function global:Set-PopupDwm($h) {
+    $pal = $global:RclonePal
+    $v = if ($pal.Light) { 0 } else { 1 }; [Win32.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$v, 4) | Out-Null  # dark mode
     $v = 2; [Win32.Dwm]::DwmSetWindowAttribute($h, 33, [ref]$v, 4) | Out-Null                              # rounded corners
-    $v = $cBorder.B * 65536 + $cBorder.G * 256 + $cBorder.R; [Win32.Dwm]::DwmSetWindowAttribute($h, 34, [ref]$v, 4) | Out-Null  # border colour
+    $b = $pal.Border; $v = $b.B * 65536 + $b.G * 256 + $b.R; [Win32.Dwm]::DwmSetWindowAttribute($h, 34, [ref]$v, 4) | Out-Null  # border colour
     $m = New-Object Win32.Dwm+MARGINS; $m.l = 1; $m.r = 1; $m.t = 1; $m.b = 1                             # drop shadow
     [Win32.Dwm]::DwmExtendFrameIntoClientArea($h, [ref]$m) | Out-Null
-})
-
+}
+$form.Add_HandleCreated({ Set-PopupDwm $this.Handle })
 $panel = New-Object System.Windows.Forms.FlowLayoutPanel
 $panel.FlowDirection = 'TopDown'
 $panel.WrapContents = $false
@@ -238,6 +248,7 @@ $panel.BackColor = $cBg
 $panel.Location = New-Object System.Drawing.Point $form.Padding.Left, $form.Padding.Top
 $form.Controls.Add($panel)
 
+$global:PopupLabels = @()
 function New-PopupLabel($font = $fontBody, $color = $cFg, [int]$top = 0, [int]$bottom = 10, $parent = $panel) {
     $l = New-Object System.Windows.Forms.Label
     $l.AutoSize = $true
@@ -247,6 +258,8 @@ function New-PopupLabel($font = $fontBody, $color = $cFg, [int]$top = 0, [int]$b
     $l.MaximumSize = New-Object System.Drawing.Size $contentWidth, 0
     $l.Margin = New-Object System.Windows.Forms.Padding 0, $top, 0, $bottom
     $parent.Controls.Add($l)
+    $role = if ($color -eq $cDim) { 'Dim' } elseif ($color -eq $cErr) { 'Err' } else { 'Fg' }
+    $global:PopupLabels += ,@($l, $role)
     $l
 }
 # Header: state icon beside "Proton Drive sync" and the state text
@@ -304,11 +317,56 @@ $btnSync.Add_Click({ if ($global:RcloneSyncing) { return }; New-Item -ItemType F
 $panel.Controls.Add($btnSync)
 $global:PopupAccent = $accent; $global:PopupTrack = $cTrack; $global:PopupDim = $cDim; $global:PopupFg = $cFg
 
+$global:PopupPanel = $panel; $global:PopupHeader = $header; $global:PopupTitleCol = $titleCol
 $global:RcloneTrayPopup = $form
 $global:RcloneTrayPopupHiddenAt = [datetime]::MinValue
 $global:PopupCtl = @{ Pic = $picState; State = $lblState; Since = $lblSince; Bar = $bar; BarTrack = $barTrack; Bytes = $lblBytes; Counts = $lblCounts
                       Files = $lblFiles; LastOk = $lblLastOk; Error = $lblError; Sync = $btnSync }
 
+function global:Set-RcloneCurrentIcon {
+    $g = $global:RcloneTrayNotify
+    $g.Icon = if ($global:RcloneSyncing) { $global:RcloneTrayIconSyncing }
+              elseif ($global:consecutiveFailures -gt 0) { $global:RcloneTrayIconBad }
+              elseif ($global:RcloneLastOk) { $global:RcloneTrayIconOk }
+              else { $global:RcloneTrayIconIdle }
+}
+
+# Re-applies the light/dark + accent theme in place: tray icons, popup colours and
+# popup images. No restart needed. Called (debounced) after a system theme change.
+function global:Update-RcloneTheme {
+    $key = Get-RcloneThemeKey
+    if ($key -eq $global:RcloneThemeKey) { return }
+    $global:RcloneThemeKey = $key
+    $pal = Get-RclonePalette $key
+    $global:RclonePal = $pal
+
+    $sfx = if ($pal.TaskbarLight) { 'black' } else { 'white' }
+    $global:RcloneTrayIconOk = New-PngIcon "synced-$sfx"
+    $global:RcloneTrayIconBad = New-PngIcon "error-$sfx"
+    $global:RcloneTrayIconSyncing = New-PngIcon "syncing-$sfx"
+    $global:RcloneTrayIconIdle = New-PngIcon "idle-$sfx"
+    Set-RcloneCurrentIcon
+
+    $appSfx = if ($pal.Light) { 'black' } else { 'white' }
+    foreach ($n in 'synced', 'syncing', 'error', 'idle') {
+        $old = $global:PopupImages[$n]
+        $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$($global:RcloneTrayRoot)\icons\$n-$appSfx.png")
+        $global:PopupCtl.Pic.Image = $null; if ($old) { $old.Dispose() }
+    }
+
+    $f = $global:RcloneTrayPopup
+    $f.SuspendLayout()
+    foreach ($c in $f, $global:PopupPanel, $global:PopupHeader, $global:PopupTitleCol) { $c.BackColor = $pal.Bg }
+    $f.ForeColor = $pal.Fg
+    foreach ($pair in $global:PopupLabels) { $pair[0].BackColor = $pal.Bg; $pair[0].ForeColor = $pal[$pair[1]] }
+    $global:PopupCtl.BarTrack.BackColor = $pal.Track
+    $global:PopupCtl.Bar.BackColor = $pal.Accent
+    $global:PopupAccent = $pal.Accent; $global:PopupTrack = $pal.Track; $global:PopupDim = $pal.Dim; $global:PopupFg = $pal.Fg
+    if ($f.IsHandleCreated) { Set-PopupDwm $f.Handle }
+    $f.ResumeLayout()
+    $f.Invalidate($true)
+    Update-RcloneTrayPopup
+}
 function global:Get-RcloneStats {
     try {
         $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
@@ -384,8 +442,8 @@ $watcher.NotifyFilter = [System.IO.NotifyFilters]'LastWrite, Size'
 Register-ObjectEvent $watcher Changed -Action { Read-RcloneTrayNewLines } | Out-Null
 $watcher.EnableRaisingEvents = $true
 
-# Theme switches: icons and popup colours are chosen at startup, so relaunch when
-# the light/dark setting changes. Event-driven (WM_SETTINGCHANGE via SystemEvents), no polling.
+# Theme switches: re-theme the tray icons and popup in place when the light/dark or accent
+# setting changes. Event-driven (WM_SETTINGCHANGE via SystemEvents), no polling.
 function global:Restart-RcloneTray {
     # A theme change raises several events; only the first may spawn a replacement
     if ($global:RcloneRestarting) { return }
@@ -401,7 +459,7 @@ $global:RcloneThemeDebounce = New-Object System.Windows.Forms.Timer
 $global:RcloneThemeDebounce.Interval = 1500
 $global:RcloneThemeDebounce.Add_Tick({
     $global:RcloneThemeDebounce.Stop()
-    if ((Get-RcloneThemeKey) -ne $global:RcloneThemeKey) { Restart-RcloneTray }
+    Update-RcloneTheme
 })
 $global:RcloneThemeWatcher = New-Object ThemeWatcher $form, ([Action]{
     $global:RcloneThemeDebounce.Stop(); $global:RcloneThemeDebounce.Start()
