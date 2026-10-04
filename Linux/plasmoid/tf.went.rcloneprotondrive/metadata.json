@@ -4,11 +4,18 @@
         "Name": "Proton Drive Sync",
         "Description": "Sync status and errors for the rclone Proton Drive bisync service",
         "Icon": "folder-cloud",
-        "Authors": [{ "Name": "WentTheFox", "Email": "mail@went.tf" }],
+        "Authors": [
+            {
+                "Name": "WentTheFox",
+                "Email": "mail@went.tf"
+            }
+        ],
         "Category": "System Information",
         "License": "Unlicense",
         "Version": "1.0"
     },
     "KPackageStructure": "Plasma/Applet",
-    "X-Plasma-API-Minimum-Version": "6.0"
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "SystemServices"
 }
