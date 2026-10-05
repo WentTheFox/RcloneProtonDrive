@@ -51,7 +51,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $Root = 'C:\ProgramData\rclone'
-$LogFile = "$Root\service.log"
+$LogFile = "$Root\logs\service.log"
 
 # Icons are rendered from the Lucide submodule by Build-Icons.ps1 (called from Register-Tray.ps1).
 function global:New-PngIcon([string]$name) {
@@ -127,24 +127,18 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
     switch ($state) {
         'start' {
             $global:RcloneStopRequested = $false
-            if (((Get-Date) - $when).TotalSeconds -lt 30) {
-                $s = Get-RcloneStatsNow
-                $global:RcloneRunStartChecks = if ($s) { $s.checks } else { $null }
-                $global:RcloneStats = $s
-            }
+            $global:RcloneStats = $null
             $global:RcloneSyncSince = $when
             $global:RcloneTrayNotify.Icon = $global:RcloneTrayIconSyncing
             $text = "Proton Drive sync: syncing ($stamp)"
             $global:RcloneTrayNotify.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
         }
         'ok' {
-            if ($null -ne $global:RcloneRunStartChecks -and ((Get-Date) - $when).TotalSeconds -lt 30) {
+            if ($global:RcloneJobGroup -and ((Get-Date) - $when).TotalSeconds -lt 30) {
                 $s = Get-RcloneStatsNow
-                if ($s -and $s.checks -ge $global:RcloneRunStartChecks) {
-                    Save-RcloneRun ($s.checks - $global:RcloneRunStartChecks) (($when - $global:RcloneSyncSince).TotalSeconds)
-                }
+                if ($s -and $s.checks -gt 0) { Save-RcloneRun $s.checks (($when - $global:RcloneSyncSince).TotalSeconds) }
             }
-            $global:RcloneRunStartChecks = $null
+            $global:RcloneJobGroup = $null
             $global:RcloneLastOk = $when
             $global:RcloneLastError = ''
             $global:consecutiveFailures = 0
@@ -153,6 +147,7 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
             $global:RcloneTrayNotify.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
         }
         'fail' {
+            $global:RcloneJobGroup = $null
             if ($global:RcloneStopRequested) {  # user stopped it: not an error
                 $global:RcloneStopRequested = $false
                 Set-RcloneCurrentIcon
@@ -443,7 +438,7 @@ function global:Get-RcloneRunningJobs {
 function global:Sync-RcloneStateFromRc {
     $jobs = Get-RcloneRunningJobs
     if ($jobs.Count -and -not $global:RcloneSyncing) {
-        $global:RcloneRunStartChecks = $null  # unknown baseline: no files-based estimate for this run
+        $global:RcloneJobGroup = "job/$($jobs[0].Id)"
         Update-RcloneTrayStatus 'start' '' $jobs[0].Start
     } elseif (-not $jobs.Count -and $global:RcloneSyncing) {
         Read-RcloneTrayNewLines  # the log knows how it ended
@@ -474,27 +469,36 @@ function global:Invoke-RcloneSyncButton {
 }
 $global:RcloneStopRequested = $false
 $global:RcloneSyncRequested = Test-Path "$Root\sync-now"
+# rclone's global counters accumulate since rcd started, but every rc job has its own stats
+# group ("job/<id>"), so asking for the running job's group gives exact per-run numbers with
+# no baseline bookkeeping (and works however late the tray notices the run).
+$global:RcloneJobGroup = $null
 function global:Get-RcloneStatsNow {
+    if (-not $global:RcloneJobGroup) { return $null }
     try {
         $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
         $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
-        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5572/core/stats' -Headers @{ Authorization = $basic } -TimeoutSec 2
+        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5572/core/stats' -Headers @{ Authorization = $basic } `
+            -ContentType 'application/json' -Body (@{ group = $global:RcloneJobGroup } | ConvertTo-Json) -TimeoutSec 2
     } catch { $null }  # keep the last snapshot rather than flicker
 }
 function global:Get-RcloneStats {
+    if (-not $global:RcloneJobGroup) {
+        $j = Get-RcloneRunningJobs
+        if ($j.Count) { $global:RcloneJobGroup = "job/$($j[0].Id)" }
+    }
     $s = Get-RcloneStatsNow
     if ($s) { $global:RcloneStats = $s }
 }
 
 # --- Rough progress across runs ----------------------------------------------
-# rclone's counters are cumulative since the rc server started, so a run's file count is the
-# difference between the counter at the "sync starting" and "sync finished" log events (no
-# polling needed). The last few runs are kept in tray-state.json; their median is the
-# estimate for how many files the current run will check.
+# A run's check count comes from its rc job's stats group (see Get-RcloneStatsNow), saved at the
+# "sync finished" log event. The last few runs are kept in tray-state.json; their median is the
+# estimate for how many checks the current run will make. bisync checks every file on both
+# sides, so this is roughly twice the file count, hence "checks" in the UI.
 $global:RcloneStateFile = "$Root\tray-state.json"
 $global:RcloneRunHistory = @()
 try { $global:RcloneRunHistory = @((Get-Content $global:RcloneStateFile -Raw -ErrorAction Stop | ConvertFrom-Json).runs) } catch { }
-$global:RcloneRunStartChecks = $null
 function global:Get-RcloneExpectedChecks {
     $h = @($global:RcloneRunHistory | ForEach-Object { $_.checks } | Where-Object { $_ -gt 0 } | Sort-Object)
     if ($h.Count) { return [double]$h[[int][Math]::Floor($h.Count / 2)] }
@@ -508,9 +512,7 @@ function global:Save-RcloneRun([double]$checks, [double]$seconds) {
     try { @{ runs = @($global:RcloneRunHistory) } | ConvertTo-Json -Depth 3 | Set-Content $global:RcloneStateFile } catch { }
 }
 function global:Get-RcloneRunChecks {
-    if ($null -eq $global:RcloneRunStartChecks -or -not $global:RcloneStats) { return $null }
-    $d = $global:RcloneStats.checks - $global:RcloneRunStartChecks
-    if ($d -lt 0) { $null } else { $d }  # negative = rc server restarted mid-run
+    if ($global:RcloneJobGroup -and $global:RcloneStats) { $global:RcloneStats.checks } else { $null }
 }
 function global:Update-RcloneTrayPopup([switch]$Force) {
     $f = $global:RcloneTrayPopup
@@ -543,13 +545,13 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
         $c.Bytes.Text = "$(Format-Bytes $s.bytes) / $(Format-Bytes $s.totalBytes) at $(Format-Bytes $s.speed)/s$eta"
     } elseif ($showBar) {
         $c.Bar.Width = [int]($c.BarTrack.Width * $frac)
-        $c.Bytes.Text = ('About {0:P0}: {1:N0} of ~{2:N0} files checked' -f $frac, $done, $expected)
+        $c.Bytes.Text = ('About {0:P0}: {1:N0} of ~{2:N0} checks' -f $frac, $done, $expected)
     }
     $c.Counts.Visible = $showStats
     $c.Files.Visible = $showStats -and $s.transferring
     if ($showStats) {
         $checked = if ($null -ne $done) { $done } else { $s.checks }
-        $c.Counts.Text = "Checked $('{0:N0}' -f $checked) files, $($s.transfers) transfers, elapsed $(Format-Duration ((Get-Date) - $(if ($global:RcloneSyncSince) { $global:RcloneSyncSince } else { Get-Date })).TotalSeconds)"
+        $c.Counts.Text = "$('{0:N0}' -f $checked) checks, $($s.transfers) transfers, elapsed $(Format-Duration ((Get-Date) - $(if ($global:RcloneSyncSince) { $global:RcloneSyncSince } else { Get-Date })).TotalSeconds)"
         if ($s.transferring) { $c.Files.Text = (($s.transferring | ForEach-Object { "$($_.name) ($($_.percentage)%)" }) -join "`n") }
     }    $c.LastOk.Text = "Last successful sync: $(Format-Ago $global:RcloneLastOk)"
     $c.Error.Visible = [bool]$failed
@@ -591,6 +593,12 @@ function global:Toggle-RcloneTrayPopup {
 
 # Prime from whatever's already in the log so the icon isn't a guess at startup.
 if (Test-Path $LogFile) { Read-RcloneTrayNewLines }
+# The log only goes back to the last service restart. bisync rewrites its listings only after
+# a successful run, so their timestamp is good evidence of the last success.
+if (-not $global:RcloneLastOk) {
+    $lst = Get-ChildItem "$Root\bisync\*.path1.lst" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($lst) { $global:RcloneLastOk = $lst.LastWriteTime; Set-RcloneCurrentIcon }
+}
 Sync-RcloneStateFromRc | Out-Null
 
 $watcher = New-Object System.IO.FileSystemWatcher (Split-Path $LogFile), (Split-Path $LogFile -Leaf)

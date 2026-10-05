@@ -24,6 +24,22 @@ $env:RCLONE_CONFIG  = $Config
 
 function Log($m) { Write-Output ("{0:s} {1}" -f (Get-Date), $m) }
 
+# rc answers a failed sync with a bare "500 / bisync aborted"; what actually went wrong
+# (e.g. "Access is denied") is only in rcd.log. Collect the ERROR lines written since $from.
+function Get-RcdErrors([long]$from) {
+    try {
+        $fs = [IO.File]::Open("$LogRoot\rcd.log", 'Open', 'Read', 'ReadWrite')
+        try {
+            if ($fs.Length -lt $from) { $from = 0 }  # rotated during the run
+            $fs.Seek($from, 'Begin') | Out-Null
+            $text = (New-Object IO.StreamReader $fs, (New-Object Text.UTF8Encoding $false)).ReadToEnd()
+        } finally { $fs.Dispose() }
+        @($text -split "`r?`n" | Where-Object { $_ -match ' ERROR : ' } |
+            ForEach-Object { $_ -replace '^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ERROR : ', '' } | Select-Object -Unique)
+    } catch { @() }
+}
+function Get-RcdLogLength { try { (Get-Item "$LogRoot\rcd.log" -ErrorAction Stop).Length } catch { 0 } }
+
 $common = @('--config', $Config, '--cache-dir', "$Root\cache")
 
 $rcd = Start-Process -FilePath $Rclone -PassThru -NoNewWindow -ArgumentList ($common + @(
@@ -61,25 +77,28 @@ while (-not $rcd.HasExited) {
     }
     Log "$Mode sync starting"
     $started = Get-Date
+    $rcdPos = Get-RcdLogLength
     try {
         $res = Invoke-RestMethod -Method Post -Uri "http://$Addr/$endpoint" -Headers @{ Authorization = $basic } `
             -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 5) -TimeoutSec 86400
         Log "$Mode sync finished: $($res | ConvertTo-Json -Compress)"
     } catch {
-        Log "$Mode sync FAILED: $($_.Exception.Message) $($_.ErrorDetails.Message)"
-        $response = $_.Exception.Response
-
-        if ($response) {
-            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-            $responseBody = $reader.ReadToEnd()
-            $reader.Close()
-
-            Log "Response Status: $($response.StatusCode)"
-            Log "Response Body:"
-            Log $responseBody
-        } else {
-            Log "Response Missing"
+        # PowerShell has already consumed the response stream: the body is in ErrorDetails.
+        $raw = "$($_.ErrorDetails.Message)" -replace '\s+', ' '
+        $reason = try { ($_.ErrorDetails.Message | ConvertFrom-Json).error } catch { $null }
+        if (-not $reason) { $reason = $_.Exception.Message }
+        $errs = Get-RcdErrors $rcdPos
+        $msg = $reason
+        if ($errs.Count) {
+            $denied = @($errs | Where-Object { $_ -match 'Access is denied|Permission denied|being used by another process' })
+            if ($denied.Count) { $msg += " - $($denied.Count) file(s) not accessible to the service account (SYSTEM); grant it read access or exclude them in bisync-filters.txt" }
+            $shown = ($errs | Select-Object -First 3 | ForEach-Object { $_.Trim() }) -join ' | '
+            $msg += ": $shown"
+            if ($errs.Count -gt 3) { $msg += " | (+$($errs.Count - 3) more, see rcd.log)" }
         }
+        # One line, because the tray reads this log line by line
+        Log "$Mode sync FAILED: $msg"
+        Log "$Mode sync failure response: $raw"
     }
     # Start-to-start schedule: sleep only what's left of the interval (0 if the run overran it)
     $wait = [math]::Max(0, $Interval - ((Get-Date) - $started).TotalSeconds)

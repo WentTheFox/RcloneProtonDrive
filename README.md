@@ -161,7 +161,7 @@ error lines from the journal; right-click offers **Sync now** and **Open web UI*
 **Stop and progress:** the widget's button turns into **Stop sync** while a run is going
 (it drops a `stop-requested` marker, then stops the unit, so a stop shows as "Sync
 stopped" rather than a failure). While the listing phase has no byte totals, the progress
-bar is files-based: rclone's checked-file counter restarts at 0 every run, so the status
+bar is files-based: rclone's check counter restarts at 0 every run, so the status
 helper keeps the counts of the last five successful runs in
 `~/.local/state/rclone-protondrive/history.json` and the widget compares against their
 median (before any history exists it uses the size of bisync's last listing).

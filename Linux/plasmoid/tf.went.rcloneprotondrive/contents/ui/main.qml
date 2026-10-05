@@ -198,10 +198,10 @@ PlasmoidItem {
                 text: (root.stats && root.stats.totalBytes > 0)
                     ? i18n("%1 / %2 at %3/s%4", root.fmtBytes(root.stats.bytes), root.fmtBytes(root.stats.totalBytes),
                         root.fmtBytes(root.stats.speed), root.stats.eta ? i18n(", ETA %1", root.fmtDur(root.stats.eta)) : "")
-                    : i18n("About %1%: %2 of ~%3 files checked", Math.round(root.fileFraction * 100), root.stats ? root.stats.checks : 0, root.status.expected)
+                    : i18n("About %1%: %2 of ~%3 checks", Math.round(root.fileFraction * 100), root.stats ? root.stats.checks : 0, root.status.expected)
             }
             PlasmaComponents.Label {
-                text: root.stats ? i18n("Checked %1 files, %2 transfers, elapsed %3",
+                text: root.stats ? i18n("%1 checks, %2 transfers, elapsed %3",
                     root.stats.checks, root.stats.transfers, root.fmtDur(root.stats.elapsedTime + (root.now - root.statsAt) / 1000)) : ""
                 opacity: 0.7
             }
