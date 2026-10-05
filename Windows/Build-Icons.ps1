@@ -20,6 +20,7 @@ $icons = @{
 }
 $outlines = @{ white = '#ffffff'; black = '#1a1a1a' }
 $size = 64
+$n = 0
 # Chromium's sandbox does not start from an elevated token
 $sandbox = if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { '--no-sandbox' } else { '' }
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -38,10 +39,14 @@ foreach ($state in $icons.Keys) { foreach ($theme in $outlines.Keys) {
     $url = ([uri]$html).AbsoluteUri
     # Never wait unbounded: headless Edge can linger after writing the screenshot (seen when elevated),
     # so give it a deadline and then kill the whole process tree. The PNG is what matters.
+    $n++
+    Write-Progress -Activity 'Rendering tray icons' -Status $name -PercentComplete (100 * ($n - 1) / ($icons.Count * $outlines.Count))
+    Write-Host "  [$n/$($icons.Count * $outlines.Count)] rendering $name..." -NoNewline
     $p = Start-Process $edge -PassThru -WindowStyle Hidden -ArgumentList "--headless=new --disable-gpu $sandbox --hide-scrollbars --user-data-dir=`"$tmp\profile`" --default-background-color=00000000 --window-size=$size,$size --screenshot=`"$Out\$name.png`" $url"
     if (-not $p.WaitForExit(20000)) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
-    Write-Host "  rendered $name"
+    Write-Host ' done'
     if (-not (Test-Path "$Out\$name.png")) { throw "Failed to render $name" }
 } }
+Write-Progress -Activity 'Rendering tray icons' -Completed
 Remove-Item $tmp -Recurse -Force
 Write-Host "Rendered tray icons to $Out"
