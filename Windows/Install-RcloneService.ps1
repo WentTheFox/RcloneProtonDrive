@@ -3,9 +3,11 @@
 # "rclone-proton" Windows service via NSSM. Safe to re-run to pick up script changes.
 $ErrorActionPreference = 'Stop'
 $Root   = 'C:\ProgramData\rclone'
+$LogRoot = "$Root\logs"
 $Here   = $PSScriptRoot
 
 New-Item -ItemType Directory -Force $Root | Out-Null
+New-Item -ItemType Directory -Force $LogRoot | Out-Null
 
 # Lock the folder down: SYSTEM, Administrators and the current user only.
 # rc-auth.txt (the web-UI password) lives here, so this matters.
@@ -60,8 +62,8 @@ $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $nssm set $svc Description 'Syncs a local folder with Proton Drive via rclone; web UI at http://127.0.0.1:5572'
 & $nssm set $svc Start SERVICE_AUTO_START
 & $nssm set $svc AppDirectory $Root
-& $nssm set $svc AppStdout "$Root\service.log"
-& $nssm set $svc AppStderr "$Root\service.log"
+& $nssm set $svc AppStdout "$LogRoot\service.log"
+& $nssm set $svc AppStderr "$LogRoot\service.log"
 & $nssm set $svc AppRotateFiles 1
 & $nssm set $svc AppRotateBytes 10485760
 & $nssm set $svc AppExit Default Restart

@@ -5,6 +5,7 @@
 $ErrorActionPreference = 'Stop'
 
 $Root   = 'C:\ProgramData\rclone'
+$LogRoot = "$Root\logs"
 $Rclone = "$Root\rclone.exe"
 $Config = "$Root\rclone.conf"
 $Trigger = "$Root\sync-now"
@@ -28,7 +29,7 @@ $common = @('--config', $Config, '--cache-dir', "$Root\cache")
 $rcd = Start-Process -FilePath $Rclone -PassThru -NoNewWindow -ArgumentList ($common + @(
     'rcd', '--rc-addr', $Addr, '--rc-web-gui', '--rc-web-gui-no-open-browser',
     '--rc-job-expire-duration', '24h',
-    '--log-level', 'INFO', '--log-file', "$Root\rcd.log", '--log-file-max-size', '20M'))
+    '--log-level', 'INFO', '--log-file', "$LogRoot\rcd.log", '--log-file-max-size', '20M'))
 Log "rcd started (pid $($rcd.Id)) on http://$Addr"
 Start-Sleep -Seconds 5
 
@@ -66,6 +67,19 @@ while (-not $rcd.HasExited) {
         Log "$Mode sync finished: $($res | ConvertTo-Json -Compress)"
     } catch {
         Log "$Mode sync FAILED: $($_.Exception.Message) $($_.ErrorDetails.Message)"
+        $response = $_.Exception.Response
+
+        if ($response) {
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            $responseBody = $reader.ReadToEnd()
+            $reader.Close()
+
+            Log "Response Status: $($response.StatusCode)"
+            Log "Response Body:"
+            Log $responseBody
+        } else {
+            Log "Response Missing"
+        }
     }
     # Start-to-start schedule: sleep only what's left of the interval (0 if the run overran it)
     $wait = [math]::Max(0, $Interval - ((Get-Date) - $started).TotalSeconds)
