@@ -20,6 +20,8 @@ $icons = @{
 }
 $outlines = @{ white = '#ffffff'; black = '#1a1a1a' }
 $size = 64
+# Chromium's sandbox does not start from an elevated token
+$sandbox = if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { '--no-sandbox' } else { '' }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $tmp = Join-Path ([IO.Path]::GetTempPath()) 'rclone-icons'
 New-Item -ItemType Directory -Force $tmp | Out-Null
@@ -34,7 +36,11 @@ foreach ($state in $icons.Keys) { foreach ($theme in $outlines.Keys) {
     Set-Content $html "<!doctype html><body style=`"margin:0;background:transparent`">$svg" -Encoding UTF8
     # Own profile dir so this never attaches to a running Edge; Start-Process keeps Edge's stderr noise out of $ErrorActionPreference
     $url = ([uri]$html).AbsoluteUri
-    Start-Process $edge -Wait -WindowStyle Hidden -ArgumentList "--headless=new --disable-gpu --hide-scrollbars --user-data-dir=`"$tmp\profile`" --default-background-color=00000000 --window-size=$size,$size --screenshot=`"$Out\$name.png`" $url"
+    # Never wait unbounded: headless Edge can linger after writing the screenshot (seen when elevated),
+    # so give it a deadline and then kill the whole process tree. The PNG is what matters.
+    $p = Start-Process $edge -PassThru -WindowStyle Hidden -ArgumentList "--headless=new --disable-gpu $sandbox --hide-scrollbars --user-data-dir=`"$tmp\profile`" --default-background-color=00000000 --window-size=$size,$size --screenshot=`"$Out\$name.png`" $url"
+    if (-not $p.WaitForExit(20000)) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
+    Write-Host "  rendered $name"
     if (-not (Test-Path "$Out\$name.png")) { throw "Failed to render $name" }
 } }
 Remove-Item $tmp -Recurse -Force
