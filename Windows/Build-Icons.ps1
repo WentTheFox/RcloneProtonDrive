@@ -24,8 +24,15 @@ $n = 0
 # Chromium's sandbox does not start from an elevated token
 $sandbox = if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { '--no-sandbox' } else { '' }
 New-Item -ItemType Directory -Force $Out | Out-Null
+# Edge helper processes (crashpad, GPU) can outlive the main process and keep the profile locked,
+# and a new Edge on a locked profile hands off to it and renders nothing
+function Stop-IconEdge {
+    Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like "*rclone-icons*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
 $tmp = Join-Path ([IO.Path]::GetTempPath()) 'rclone-icons'
 New-Item -ItemType Directory -Force $tmp | Out-Null
+Stop-IconEdge
 foreach ($state in $icons.Keys) { foreach ($theme in $outlines.Keys) {
     $name = "$state-$theme"
     $svg = Get-Content "$Lucide\$($icons[$state][0]).svg" -Raw
@@ -48,5 +55,8 @@ foreach ($state in $icons.Keys) { foreach ($theme in $outlines.Keys) {
     if (-not (Test-Path "$Out\$name.png")) { throw "Failed to render $name" }
 } }
 Write-Progress -Activity 'Rendering tray icons' -Completed
-Remove-Item $tmp -Recurse -Force
+Stop-IconEdge
+Start-Sleep -Milliseconds 500
+# Best effort: a leftover temp folder must never fail the registration
+try { Remove-Item $tmp -Recurse -Force -ErrorAction Stop } catch { Write-Host "Note: could not remove $tmp ($($_.Exception.Message))" }
 Write-Host "Rendered tray icons to $Out"
