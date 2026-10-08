@@ -77,28 +77,41 @@ while (-not $rcd.HasExited) {
     }
     Log "$Mode sync starting"
     $started = Get-Date
-    $rcdPos = Get-RcdLogLength
-    try {
-        $res = Invoke-RestMethod -Method Post -Uri "http://$Addr/$endpoint" -Headers @{ Authorization = $basic } `
-            -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 5) -TimeoutSec 86400
-        Log "$Mode sync finished: $($res | ConvertTo-Json -Compress)"
-    } catch {
-        # PowerShell has already consumed the response stream: the body is in ErrorDetails.
-        $raw = "$($_.ErrorDetails.Message)" -replace '\s+', ' '
-        $reason = try { ($_.ErrorDetails.Message | ConvertFrom-Json).error } catch { $null }
-        if (-not $reason) { $reason = $_.Exception.Message }
-        $errs = Get-RcdErrors $rcdPos
-        $msg = $reason
-        if ($errs.Count) {
-            $denied = @($errs | Where-Object { $_ -match 'Access is denied|Permission denied|being used by another process' })
-            if ($denied.Count) { $msg += " - $($denied.Count) file(s) not accessible to the service account (SYSTEM); grant it read access or exclude them in bisync-filters.txt" }
-            $shown = ($errs | Select-Object -First 3 | ForEach-Object { $_.Trim() }) -join ' | '
-            $msg += ": $shown"
-            if ($errs.Count -gt 3) { $msg += " | (+$($errs.Count - 3) more, see rcd.log)" }
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $rcdPos = Get-RcdLogLength
+        try {
+            $res = Invoke-RestMethod -Method Post -Uri "http://$Addr/$endpoint" -Headers @{ Authorization = $basic } `
+                -ContentType 'application/json' -Body ($body | ConvertTo-Json -Depth 5) -TimeoutSec 86400
+            Log "$Mode sync finished: $($res | ConvertTo-Json -Compress)"
+            break
+        } catch {
+            # PowerShell has already consumed the response stream: the body is in ErrorDetails.
+            $raw = "$($_.ErrorDetails.Message)" -replace '\s+', ' '
+            $reason = try { ($_.ErrorDetails.Message | ConvertFrom-Json).error } catch { $null }
+            if (-not $reason) { $reason = $_.Exception.Message }
+            $errs = Get-RcdErrors $rcdPos
+            $msg = $reason
+            if ($errs.Count) {
+                $denied = @($errs | Where-Object { $_ -match 'Access is denied|Permission denied|being used by another process' })
+                if ($denied.Count) { $msg += " - $($denied.Count) file(s) not accessible to the service account (SYSTEM); grant it read access or exclude them in bisync-filters.txt" }
+                $shown = ($errs | Select-Object -First 3 | ForEach-Object { $_.Trim() }) -join ' | '
+                $msg += ": $shown"
+                if ($errs.Count -gt 3) { $msg += " | (+$($errs.Count - 3) more, see rcd.log)" }
+            }
+            # Proton session tokens expire; a 401 on refresh gets misreported by bisync as a
+            # delete-count safety abort. One plain rclone call forces the backend to refresh
+            # client_access_token/client_refresh_token in rclone.conf, then we retry once.
+            $isAuthError = ("$raw $msg" -match 'Invalid access token|401 GET|invalid.?(access.?)?token')
+            if ($isAuthError -and $attempt -eq 1) {
+                Log "$Mode sync hit an expired Proton session token; refreshing and retrying once"
+                & $Rclone @common lsf $Remote --max-depth 1 *>&1 | Out-Null
+                continue
+            }
+            # One line, because the tray reads this log line by line
+            Log "$Mode sync FAILED: $msg"
+            Log "$Mode sync failure response: $raw"
+            break
         }
-        # One line, because the tray reads this log line by line
-        Log "$Mode sync FAILED: $msg"
-        Log "$Mode sync failure response: $raw"
     }
     # Start-to-start schedule: sleep only what's left of the interval (0 if the run overran it)
     $wait = [math]::Max(0, $Interval - ((Get-Date) - $started).TotalSeconds)
