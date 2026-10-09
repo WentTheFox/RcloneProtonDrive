@@ -9,6 +9,7 @@ $LogRoot = "$Root\logs"
 $Rclone = "$Root\rclone.exe"
 $Config = "$Root\rclone.conf"
 $Trigger = "$Root\sync-now"
+$PauseFile = "$Root\sync-paused.json"
 
 $cfg = Import-PowerShellDataFile "$Root\config.psd1"
 $Local    = $cfg.LocalPath
@@ -40,6 +41,35 @@ function Get-RcdErrors([long]$from) {
 }
 function Get-RcdLogLength { try { (Get-Item "$LogRoot\rcd.log" -ErrorAction Stop).Length } catch { 0 } }
 
+# Turns a raw rclone error into a plain-English line the tray can show as-is, and decides
+# whether the problem is one more retry will fix (transient) or needs a human to look at a
+# specific file/setting first (paused: the service stops touching Proton until resolved).
+function Get-FailureGuidance([string]$raw, [string]$msg) {
+    $all = "$raw $msg"
+    if ($all -match 'file not found in Path2' -and $all -match 'file not found in Path1' -and $all -match 'out of sync|Must run --resync') {
+        return @{ Pause = $true; Guidance =
+            'Paused: a file differs only by letter case between local and Proton (e.g. .pdf vs .PDF) - ' +
+            'this usually means duplicate copies exist on Proton. Check Proton''s web app for a ' +
+            'duplicate-case filename, delete one copy, then choose "Resume sync" in the tray.' }
+    }
+    if ($all -match 'too many deletes') {
+        return @{ Pause = $true; Guidance =
+            "Paused: a sync would delete more files than the safety limit allows ($msg). " +
+            'Review what changed on both sides, then choose "Resume sync" in the tray once you''re sure.' }
+    }
+    if ($all -match 'Access is denied|Permission denied') {
+        return @{ Pause = $false; Guidance =
+            'Some file(s) are not readable by the service account (SYSTEM). Grant it access, or ' +
+            "exclude them in bisync-filters.txt. ($msg)" }
+    }
+    if ($all -match 'Invalid access token|401 GET') {
+        return @{ Pause = $false; Guidance =
+            'Proton session token expired; the service already retried once automatically. If this ' +
+            'keeps recurring, your Proton password or 2FA may have changed - re-run rclone config.' }
+    }
+    @{ Pause = $false; Guidance = $msg }
+}
+
 $common = @('--config', $Config, '--cache-dir', "$Root\cache")
 
 $rcd = Start-Process -FilePath $Rclone -PassThru -NoNewWindow -ArgumentList ($common + @(
@@ -53,6 +83,21 @@ Start-Sleep -Seconds 5
 $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
 
 while (-not $rcd.HasExited) {
+    if (Test-Path $PauseFile) {
+        if (Test-Path $Trigger) {
+            # "Resume sync" in the tray: drop the pause and let this cycle try for real.
+            Remove-Item $PauseFile -Force
+            Log 'sync resumed (will re-pause if the same problem is still there)'
+        } else {
+            Log 'sync paused: resolve the issue, then choose "Resume sync" in the tray'
+            $deadline = (Get-Date).AddSeconds($Interval)
+            while ((Get-Date) -lt $deadline -and -not $rcd.HasExited) {
+                if (Test-Path $Trigger) { break }
+                Start-Sleep -Seconds 3
+            }
+            continue
+        }
+    }
     if ($Mode -eq 'download') {
         # One-way proton: -> LocalPath. copy never deletes locally; Update keeps
         # local files that are newer than the remote copy.
@@ -111,8 +156,13 @@ while (-not $rcd.HasExited) {
                 & $Rclone @common lsf $Remote --max-depth 1 *>&1 | Out-Null
                 continue
             }
+            $g = Get-FailureGuidance $raw $msg
+            if ($g.Pause) {
+                @{ guidance = $g.Guidance; detail = $msg; since = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss') } |
+                    ConvertTo-Json | Set-Content $PauseFile
+            }
             # One line, because the tray reads this log line by line
-            Log "$Mode sync FAILED: $msg"
+            Log "$Mode sync FAILED: $($g.Guidance)"
             Log "$Mode sync failure response: $raw"
             break
         }

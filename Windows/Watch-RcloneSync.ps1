@@ -52,6 +52,7 @@ Add-Type -AssemblyName System.Drawing
 
 $Root = 'C:\ProgramData\rclone'
 $LogFile = "$Root\logs\service.log"
+$PauseFile = "$Root\sync-paused.json"
 
 # Icons are rendered from the Lucide submodule by Build-Icons.ps1 (called from Register-Tray.ps1).
 function global:New-PngIcon([string]$name) {
@@ -98,6 +99,8 @@ $itemOpen = $menu.Items.Add('Open web UI')
 $itemOpen.Add_Click({ Start-Process (Get-WebGuiUrl) })
 $itemSync = $menu.Items.Add('Sync now')
 $itemSync.Add_Click({ Request-RcloneSync })
+$itemResume = $menu.Items.Add('Resume sync')
+$itemResume.Add_Click({ Resume-RcloneSync })
 $menu.Items.Add('-') | Out-Null
 $itemRestart = $menu.Items.Add('Restart tray icon')
 $itemRestart.Add_Click({ Restart-RcloneTray })
@@ -120,6 +123,36 @@ $global:RcloneTrayIconIdle = $iconIdle
 $global:RcloneTrayLogFile = $LogFile
 $global:consecutiveFailures = 0
 $global:lastOffset = 0
+$global:RcloneSyncPaused = $false
+$global:RcloneSyncPauseGuidance = ''
+$global:RcloneSyncPauseSince = $null
+$global:RclonePauseFile = $PauseFile
+
+# sync-paused.json means the service has stopped touching Proton until a human resolves
+# something (duplicate case-only filenames, a too-big delete, etc.) - read it whenever it
+# might have changed and reflect that distinctly rather than just another "FAILED" blip.
+function global:Update-RcloneTrayPauseState {
+    $info = $null
+    try { if (Test-Path $global:RclonePauseFile) { $info = Get-Content $global:RclonePauseFile -Raw | ConvertFrom-Json } } catch { }
+    $global:RcloneSyncPaused = [bool]$info
+    if ($info) {
+        # No balloon here: the "sync FAILED" log line that caused this pause already showed
+        # one with the same guidance text (see Update-RcloneTrayStatus 'fail'), so this would
+        # just be a duplicate - this function only needs to track and display the state.
+        $global:RcloneSyncPauseGuidance = $info.guidance
+        $global:RcloneSyncPauseSince = try { [datetime]::Parse($info.since) } catch { Get-Date }
+    } else {
+        $global:RcloneSyncPauseSince = $null
+    }
+    if (-not $global:RcloneSyncing) { Set-RcloneCurrentIcon }
+    Update-RcloneTrayPopup
+}
+# "Resume sync" in the tray: clear the pause and ask the service to try again right away.
+function global:Resume-RcloneSync {
+    try { Remove-Item -Force $global:RclonePauseFile -ErrorAction SilentlyContinue } catch { }
+    Update-RcloneTrayPauseState
+    Request-RcloneSync
+}
 
 function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when = (Get-Date)) {
     $stamp = Get-Date -Format 'HH:mm:ss'
@@ -190,7 +223,7 @@ function global:Read-RcloneTrayNewLines {
             elseif ($line -match 'sync starting') { Update-RcloneTrayStatus 'start' '' $when }
         }
     } catch { }
-    Update-RcloneTrayPopup
+    Update-RcloneTrayPauseState
 }
 
 # --- Status popup (left-click the tray icon) --------------------------------
@@ -358,9 +391,13 @@ $global:PopupCtl = @{ Pic = $picState; State = $lblState; Since = $lblSince; Bar
 function global:Set-RcloneCurrentIcon {
     $g = $global:RcloneTrayNotify
     $g.Icon = if ($global:RcloneSyncing) { $global:RcloneTrayIconSyncing }
-              elseif ($global:consecutiveFailures -gt 0) { $global:RcloneTrayIconBad }
+              elseif ($global:RcloneSyncPaused -or $global:consecutiveFailures -gt 0) { $global:RcloneTrayIconBad }
               elseif ($global:RcloneLastOk) { $global:RcloneTrayIconOk }
               else { $global:RcloneTrayIconIdle }
+    if ($global:RcloneSyncPaused -and -not $global:RcloneSyncing) {
+        $text = 'Proton Drive sync: PAUSED - ' + $global:RcloneSyncPauseGuidance
+        $g.Text = $text.Substring(0, [Math]::Min(63, $text.Length))
+    }
 }
 
 # Re-applies the light/dark + accent theme in place: tray icons, popup colours and
@@ -465,7 +502,9 @@ function global:Stop-RcloneSync {
     Update-RcloneSyncRequested
 }
 function global:Invoke-RcloneSyncButton {
-    if ($global:RcloneSyncing -or $global:RcloneSyncRequested) { Stop-RcloneSync } else { Request-RcloneSync }
+    if ($global:RcloneSyncing -or $global:RcloneSyncRequested) { Stop-RcloneSync }
+    elseif ($global:RcloneSyncPaused) { Resume-RcloneSync }
+    else { Request-RcloneSync }
 }
 $global:RcloneStopRequested = $false
 $global:RcloneSyncRequested = Test-Path "$Root\sync-now"
@@ -520,9 +559,10 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $c = $global:PopupCtl
     $requested = (Test-Path "$($global:RcloneTrayRoot)\sync-now") -and -not $global:RcloneSyncing
     $syncing = $global:RcloneSyncing -or $requested
-    $failed = (-not $syncing) -and $global:RcloneLastError
-    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
-    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { 'Syncing...' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
+    $paused = (-not $syncing) -and $global:RcloneSyncPaused
+    $failed = (-not $syncing) -and (-not $paused) -and $global:RcloneLastError
+    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($paused -or $failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
+    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { 'Syncing...' } elseif ($paused) { 'Sync paused' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
     $c.Since.Visible = $syncing
     if ($requested) { $c.Since.Text = 'Waiting for the service to start the run' }
     elseif ($syncing) {
@@ -554,9 +594,9 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
         $c.Counts.Text = "$('{0:N0}' -f $checked) checks, $($s.transfers) transfers, elapsed $(Format-Duration ((Get-Date) - $(if ($global:RcloneSyncSince) { $global:RcloneSyncSince } else { Get-Date })).TotalSeconds)"
         if ($s.transferring) { $c.Files.Text = (($s.transferring | ForEach-Object { "$($_.name) ($($_.percentage)%)" }) -join "`n") }
     }    $c.LastOk.Text = "Last successful sync: $(Format-Ago $global:RcloneLastOk)"
-    $c.Error.Visible = [bool]$failed
-    $c.Error.Text = $global:RcloneLastError
-    $c.Sync.Text = if ($requested) { 'Cancel request' } elseif ($syncing) { 'Stop sync' } else { 'Sync now' }
+    $c.Error.Visible = [bool]$failed -or $paused
+    $c.Error.Text = if ($paused) { $global:RcloneSyncPauseGuidance } else { $global:RcloneLastError }
+    $c.Sync.Text = if ($requested) { 'Cancel request' } elseif ($syncing) { 'Stop sync' } elseif ($paused) { 'Resume sync' } else { 'Sync now' }
     $c.Sync.BackColor = if ($syncing) { $global:PopupTrack } else { $global:PopupAccent }
     $c.Sync.ForeColor = if ($syncing) { $global:PopupFg } else { [System.Drawing.Color]::White }
     $f.Timer.Enabled = $syncing -and $f.Visible
