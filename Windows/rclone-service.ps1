@@ -72,6 +72,10 @@ while (-not $rcd.HasExited) {
             conflictResolve = 'newer'
             # Local files bisync would overwrite/delete are kept here (Proton has its own trash)
             backupDir1 = "$Local.rclone-backup"
+            # The rc endpoint does NOT fall back to bisync's documented 50% CLI default when this
+            # is simply absent from the JSON body - it silently defaults to 0, so every run aborted
+            # on even a single harmless delete. Set explicitly, as a percent of total file count.
+            maxDelete = 5
         }
         if (-not (Test-Path "$Root\bisync\*.lst")) { $body.resync = $true; $body.resyncMode = 'newer'; Log 'first run: --resync (newer wins)' }
     }
