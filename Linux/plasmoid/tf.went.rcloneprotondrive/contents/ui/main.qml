@@ -44,8 +44,18 @@ PlasmoidItem {
     function requestStats() {
         if (statsPending) return
         statsPending = true
-        exec.connectSource(statsCmd)
+        Qt.callLater(connectStats)
     }
+    // Sources are (re)connected from a fresh event-loop turn, never from inside onNewData: the
+    // executable engine can answer a just-disconnected, still-cached source synchronously,
+    // which made these handlers call each other until the JS stack overflowed (widget stuck).
+    // A trailing shell comment makes every run a distinct source, so a cached answer can never be
+    // replayed for it (and the handlers below match sources by prefix).
+    property int seq: 0
+    function uniq(cmd) { return cmd + " # " + (++seq) }
+    function connectStats() { exec.connectSource(uniq(statsCmd)) }
+    function connectQuery() { exec.connectSource(uniq(queryCmd)) }
+    function connectWaiter() { exec.connectSource(uniq("python3 " + waitScript + " " + statusDir + " " + unit)) }
     function refreshStats() {
         if (root.expanded && root.running) requestStats()
         else root.stats = null
@@ -104,11 +114,11 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
-            if (source === root.statsCmd) {
+            if (source.startsWith(root.statsCmd)) {
                 root.statsPending = false
                 // On a failed request keep showing the last snapshot rather than flicker
                 try { root.stats = JSON.parse(data.stdout); root.statsAt = Date.now(); root.now = root.statsAt } catch (e) {}
-            } else if (source === root.queryCmd) {
+            } else if (source.startsWith(root.queryCmd)) {
                 const parts = (data.stdout || "").split("@@")
                 try { root.status = JSON.parse(parts[0]) } catch (e) { root.status = { state: "unknown" } }
                 const active = (parts[1] || "").trim()
@@ -117,17 +127,17 @@ PlasmoidItem {
                 root.running = active === "active" || active === "activating" || active === "deactivating"
                 root.refreshStats()
                 // Re-arm: blocks until the status file or the unit's D-Bus state changes
-                connectSource("python3 " + root.waitScript + " " + root.statusDir + " " + root.unit)
+                Qt.callLater(root.connectWaiter)
             } else {
-                connectSource(root.queryCmd)
+                Qt.callLater(root.connectQuery)
             }
         }
     }
 
-    Component.onCompleted: exec.connectSource(queryCmd)
+    Component.onCompleted: connectQuery()
 
     // Cheap safety net for the instant between a waiter exiting and being re-armed
-    onExpandedChanged: { if (expanded) exec.connectSource(queryCmd); else stats = null }
+    onExpandedChanged: { if (expanded) connectQuery(); else stats = null }
 
     // The marker tells the status helper this was a user stop, not a failure
     function stopSync() {
