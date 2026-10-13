@@ -3,8 +3,13 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 
-install -Dm755 "$here/bin/rclone-protondrive-status" ~/.local/bin/rclone-protondrive-status
+install -Dm755 -t ~/.local/bin "$here"/bin/rclone-protondrive-*
 install -Dm644 -t ~/.config/systemd/user "$here"/systemd/*
+
+conf=~/.config/rclone-protondrive
+install -dm700 "$conf"
+install -Dm644 "$here/bisync-filters.txt" "$conf/bisync-filters.txt"
+[[ -e $conf/config.env ]] || { install -Dm644 "$here/config.example.env" "$conf/config.env"; echo "Created $conf/config.env"; }
 
 rc=~/.config/rclone-protondrive/rc.env
 if [[ ! -e $rc ]]; then

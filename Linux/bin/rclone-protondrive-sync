@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Runs one sync pass using ~/.config/rclone-protondrive/config.env.
+# Usage: rclone-protondrive-sync [download|bisync]   (default: MODE from the config)
+set -euo pipefail
+
+dir=${XDG_CONFIG_HOME:-$HOME/.config}/rclone-protondrive
+# Defaults, overridden by config.env
+LOCAL_PATH=/mnt/d/ProtonDrive
+REMOTE=ProtonDrive:
+MODE=bisync
+REQUIRE_MOUNT=/mnt/d
+RC_ADDR=localhost:5573
+# shellcheck disable=SC1091
+[[ -r $dir/config.env ]] && . "$dir/config.env"
+mode=${1:-$MODE}
+state=${XDG_STATE_HOME:-$HOME/.local/state}/rclone-protondrive
+
+# Paused (see rclone-protondrive-status): a human has to look at something first. Syncing
+# again blindly is what makes problems like duplicate case-only filenames worse. The
+# widget's "Resume sync" / "Sync now" removes the file.
+if [[ -e $state/sync-paused.json ]]; then
+    echo 'sync paused: resolve the issue, then choose "Resume sync" in the widget'
+    exit 0
+fi
+
+
+# Never sync into LOCAL_PATH if its drive isn't mounted (it would land on the root disk)
+[[ -z $REQUIRE_MOUNT ]] || mountpoint -q "$REQUIRE_MOUNT"
+mkdir -p "$LOCAL_PATH"
+
+common=(--create-empty-src-dirs --filter-from "$dir/bisync-filters.txt" --stats 1m -v
+        --rc --rc-addr "$RC_ADDR" --rc-web-gui --rc-web-gui-no-open-browser)
+
+# Runs rclone, mirroring its output to $out so failures can be classified afterwards
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+attempt() {
+    set +e
+    "$@" 2>&1 | tee "$out"
+    local rc=${PIPESTATUS[0]}
+    set -e
+    return "$rc"
+}
+# Proton session tokens expire; a 401 on refresh gets misreported by bisync as a delete-count
+# safety abort. One plain rclone call forces the backend to refresh its tokens, then retry once.
+run() {
+    attempt "$@" && return 0
+    local rc=$?
+    if grep -qiE 'Invalid access token|401 GET' "$out"; then
+        echo 'sync hit an expired Proton session token; refreshing and retrying once'
+        rclone lsf "$REMOTE" --max-depth 1 >/dev/null 2>&1 || true
+        attempt "$@" && return 0
+        rc=$?
+    fi
+    return "$rc"
+}
+
+case $mode in
+download)
+    # One-way remote -> local. copy never deletes locally; --update keeps newer local
+    # files, and anything copy would overwrite is moved outside the synced tree first.
+    run rclone copy "$REMOTE" "$LOCAL_PATH" "${common[@]}" --update \
+        --backup-dir "$LOCAL_PATH.rclone-backup" --suffix ".$(date +%Y%m%d-%H%M%S)"
+    ;;
+bisync)
+    args=(--resilient --recover --max-lock 2m --conflict-resolve newer --max-delete 5
+          # Local files bisync would overwrite/delete are kept here (Proton has its own trash).
+          # Remote stays path1 (as in the original unit) so existing bisync listings still match.
+          --backup-dir2 "$LOCAL_PATH.rclone-backup")
+    if ! compgen -G "${XDG_CACHE_HOME:-$HOME/.cache}/rclone/bisync/*.lst" >/dev/null; then
+        echo 'first run: --resync (newer wins)'
+        args+=(--resync --resync-mode newer)
+    fi
+    run rclone bisync "$REMOTE" "$LOCAL_PATH" "${common[@]}" "${args[@]}"
+    ;;
+*)
+    echo "unknown mode '$mode' (expected download or bisync)" >&2
+    exit 2
+    ;;
+esac

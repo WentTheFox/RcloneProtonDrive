@@ -19,6 +19,11 @@ PATH = os.path.join(RUNTIME, "rclone-protondrive", "status.json")
 STOP_MARKER = os.path.join(RUNTIME, "rclone-protondrive", "stop-requested")
 STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "rclone-protondrive")
 HISTORY = os.path.join(STATE_DIR, "history.json")
+# Survives reboots (the status file lives in the runtime dir), so "last successful sync" isn't lost
+LAST_OK = os.path.join(STATE_DIR, "last-ok")
+# While this exists the sync script does nothing until a human resolves the problem and
+# the widget's "Resume sync" / "Sync now" removes it
+PAUSE = os.path.join(STATE_DIR, "sync-paused.json")
 CHECKS = re.compile(r"Checks:\s+(\d+)\s*/\s*(\d+)")
 
 
@@ -36,6 +41,56 @@ def write(d):
     with open(tmp, "w") as f:
         json.dump(d, f)
     os.replace(tmp, PATH)  # atomic rename -> one inotify event for the watcher
+
+
+def last_ok_persisted():
+    try:
+        with open(LAST_OK) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def save_last_ok(ts):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(LAST_OK, "w") as f:
+        f.write(str(ts))
+
+
+def guidance(text, msg):
+    """Plain-English line for a known failure signature, and whether to pause until resolved."""
+    if re.search(r"file not found in Path2", text) and re.search(r"file not found in Path1", text) \
+            and re.search(r"out of sync|Must run --resync", text):
+        return True, ("Paused: a file differs only by letter case between local and Proton (e.g. .pdf vs .PDF) - "
+                      "this usually means duplicate copies exist on Proton. Check Proton's web app for a "
+                      "duplicate-case filename, delete one copy, then choose \"Resume sync\" in the widget.")
+    if re.search(r"too many deletes", text, re.I):
+        return True, (f"Paused: a sync would delete more files than the safety limit allows ({msg}). "
+                      "Review what changed on both sides, then choose \"Resume sync\" in the widget once you're sure.")
+    if re.search(r"Permission denied|Access is denied", text):
+        return False, ("Some file(s) are not readable by your user. Fix their permissions, or exclude them in "
+                       f"~/.config/rclone-protondrive/bisync-filters.txt. ({msg})")
+    if re.search(r"Invalid access token|401 GET", text):
+        return False, ("Proton session token expired; the sync already retried once automatically. If this keeps "
+                       "recurring, your Proton password or 2FA may have changed - re-run rclone config.")
+    return False, msg
+
+
+def read_pause():
+    try:
+        with open(PAUSE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def notify(title, body):
+    # Best effort: no notification daemon must never turn into a failed unit
+    try:
+        subprocess.run(["notify-send", "-u", "critical", "-i", "dialog-error", "-a", "Proton Drive sync", title, body],
+                       timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def journal_lines(n):
@@ -100,33 +155,61 @@ def main():
     now = int(time.time())
     prev = read()
     if mode == "syncing":
+        if read_pause():
+            return  # the script is about to exit immediately; don't flash "syncing"
         try:
             os.remove(STOP_MARKER)  # a stale marker from an earlier stop must not mask a real failure
         except OSError:
             pass
-        write({"state": "syncing", "since": now, "lastOk": prev.get("lastOk"), "lastResult": prev.get("lastResult"),
-               "errors": [], "message": "", "expected": expected_checks()})
+        write({"state": "syncing", "since": now, "lastOk": prev.get("lastOk") or last_ok_persisted(), "lastResult": prev.get("lastResult"),
+               "errors": [], "message": "", "failures": prev.get("failures", 0), "expected": expected_checks()})
     elif mode == "finished":
         result = os.environ.get("SERVICE_RESULT", "unknown")
         code = os.environ.get("EXIT_STATUS", "")
         stopped = os.path.exists(STOP_MARKER)
+        pause = read_pause()
+        if pause:
+            # A run that only noticed the pause (e.g. the timer fired): keep, or restore after a
+            # reboot, the paused state without notifying again
+            if prev.get("state") != "paused":
+                write({"state": "paused", "since": pause.get("since", now), "lastOk": prev.get("lastOk") or last_ok_persisted(),
+                       "lastResult": "paused", "errors": [], "message": pause.get("guidance", ""), "failures": prev.get("failures", 0)})
+            return
         if stopped:
             try:
                 os.remove(STOP_MARKER)
             except OSError:
                 pass
-            write({"state": "stopped", "since": now, "lastOk": prev.get("lastOk"), "lastResult": "stopped",
-                   "errors": [], "message": ""})
+            write({"state": "stopped", "since": now, "lastOk": prev.get("lastOk") or last_ok_persisted(), "lastResult": "stopped",
+                   "errors": [], "message": "", "failures": prev.get("failures", 0)})
         elif result == "success":
             checks = checked_files(journal_lines(2000))
             if checks:
                 save_run(checks, now - prev.get("since", now))
-            write({"state": "idle", "since": now, "lastOk": now, "lastResult": "success", "errors": [], "message": ""})
+            save_last_ok(now)
+            write({"state": "idle", "since": now, "lastOk": now, "lastResult": "success", "errors": [], "message": "",
+                   "failures": 0})
         else:
             errs = recent_errors()
-            msg = errs[-1] if errs else f"{result} (exit {code})"
-            write({"state": "error", "since": now, "lastOk": prev.get("lastOk"), "lastResult": result,
-                   "errors": errs, "message": msg})
+            # Prefer the root cause (e.g. a file that couldn't be read) over bisync's generic
+            # "aborted" summary, which tends to come last
+            specific = [e for e in errs if not re.search(r"bisync (critical|aborted)|Failed to bisync", e, re.I)]
+            msg = (specific or errs or [f"{result} (exit {code})"])[-1]
+            pause_it, msg = guidance("\n".join(ANSI.sub("", l) for l in journal_lines(400)), msg)
+            if pause_it:
+                os.makedirs(STATE_DIR, exist_ok=True)
+                with open(PAUSE, "w") as f:
+                    json.dump({"guidance": msg, "since": now}, f)
+                write({"state": "paused", "since": now, "lastOk": prev.get("lastOk") or last_ok_persisted(),
+                       "lastResult": result, "errors": [], "message": msg, "failures": prev.get("failures", 0)})
+                notify("Proton Drive sync paused", msg[:200])
+                return
+            failures = prev.get("failures", 0) + 1
+            write({"state": "error", "since": now, "lastOk": prev.get("lastOk") or last_ok_persisted(), "lastResult": result,
+                   "errors": errs, "message": msg, "failures": failures})
+            # First failure, then every 4th, so a stuck sync can't sit broken silently
+            if failures == 1 or failures % 4 == 0:
+                notify("Proton Drive sync is failing" + (f" (x{failures})" if failures > 1 else ""), msg[:200])
     else:
         sys.exit(__doc__)
 

@@ -14,7 +14,7 @@ PlasmoidItem {
     readonly property string statusDir: "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rclone-protondrive"
     readonly property string waitScript: Qt.resolvedUrl("../scripts/wait-for-change").toString().replace("file://", "")
     readonly property string unit: "rclone-protondrive-sync.service"
-    readonly property string queryCmd: "sh -c 'cat " + statusDir + "/status.json 2>/dev/null; echo; echo @@; systemctl --user show -p ActiveState --value " + unit + "'"
+    readonly property string queryCmd: "sh -c 'cat " + statusDir + "/status.json 2>/dev/null; echo; echo @@; systemctl --user show -p ActiveState --value " + unit + "; echo @@; { cat ~/.local/state/rclone-protondrive/last-ok 2>/dev/null; stat -c %Y ~/.cache/rclone/bisync/*.lst 2>/dev/null; } | sort -n | tail -1'"
     // Credentials are fed to curl on stdin so the password never shows up in `ps`
     readonly property string statsCmd: "sh -c '. ~/.config/rclone-protondrive/rc.env 2>/dev/null; printf \"user = \\\"%s:%s\\\"\\n\" \"$RCLONE_RC_USER\" \"$RCLONE_RC_PASS\" | curl -sS -m 5 -K - -X POST http://localhost:5573/core/stats'"
     property var stats: null
@@ -53,6 +53,8 @@ PlasmoidItem {
 
     // True while systemd says the unit is running, even if the status file predates it
     property bool running: false
+    property double lastOkFallback: 0
+    readonly property double lastOk: status.lastOk || lastOkFallback
     readonly property string effectiveState: running ? "syncing" : status.state
 
     // Lucide icons (see README), staged into contents/icons by install.sh and drawn by
@@ -62,14 +64,17 @@ PlasmoidItem {
         case "syncing": return "syncing"
         case "idle": return "synced"
         case "error": return "error"
+        case "paused": return "error"
         case "stopped": return "idle"
         default: return "idle"
         }
-    }    readonly property string stateText: {
+    }
+    readonly property string stateText: {
         switch (effectiveState) {
         case "syncing": return i18n("Syncing…")
         case "idle": return i18n("Up to date")
         case "error": return i18n("Sync failed")
+        case "paused": return i18n("Sync paused")
         case "stopped": return i18n("Sync stopped")
         default: return i18n("No sync run yet")
         }
@@ -77,8 +82,9 @@ PlasmoidItem {
 
     Plasmoid.icon: "folder-cloud"
     toolTipMainText: i18n("Proton Drive")
-    toolTipSubText: effectiveState === "error" && status.message ? status.message : stateText
-    Plasmoid.status: effectiveState === "error" ? PlasmaCore.Types.NeedsAttentionStatus
+    toolTipSubText: (effectiveState === "error" || effectiveState === "paused") && status.message
+        ? (status.failures > 1 ? i18n("Failed x%1: %2", status.failures, status.message) : status.message) : stateText
+    Plasmoid.status: (effectiveState === "error" || effectiveState === "paused") ? PlasmaCore.Types.NeedsAttentionStatus
         : effectiveState === "syncing" ? PlasmaCore.Types.ActiveStatus
         : PlasmaCore.Types.PassiveStatus
 
@@ -106,6 +112,8 @@ PlasmoidItem {
                 const parts = (data.stdout || "").split("@@")
                 try { root.status = JSON.parse(parts[0]) } catch (e) { root.status = { state: "unknown" } }
                 const active = (parts[1] || "").trim()
+                // After a reboot the status file is gone: fall back to the last success on disk
+                root.lastOkFallback = parseInt((parts[2] || "").trim()) || 0
                 root.running = active === "active" || active === "activating" || active === "deactivating"
                 root.refreshStats()
                 // Re-arm: blocks until the status file or the unit's D-Bus state changes
@@ -130,13 +138,14 @@ PlasmoidItem {
     // (rclone's counter restarts at 0 every run; the helper keeps the history)
     readonly property real fileFraction: (stats && status.expected > 0) ? Math.min(0.99, stats.checks / status.expected) : -1
 
+    // Also clears a pause (the user has looked at the problem); the script re-pauses if it persists
     function syncNow() {
-        exec.connectSource("systemctl --user start --no-block " + unit)
+        exec.connectSource("sh -c 'rm -f ~/.local/state/rclone-protondrive/sync-paused.json; systemctl --user start --no-block " + unit + "'")
     }
 
     Plasmoid.contextualActions: [
         PlasmaCore.Action {
-            text: i18n("Sync now")
+            text: root.effectiveState === "paused" ? i18n("Resume sync") : i18n("Sync now")
             icon.name: "view-refresh"
             enabled: root.effectiveState !== "syncing"
             onTriggered: root.syncNow()
@@ -217,19 +226,19 @@ PlasmoidItem {
             }
         }
         PlasmaComponents.Label {
-            text: i18n("Last successful sync: %1", root.ago(root.status.lastOk))
+            text: i18n("Last successful sync: %1", root.ago(root.lastOk))
             opacity: 0.7
         }
         PlasmaComponents.Label {
-            visible: root.effectiveState === "error"
-            text: (root.status.errors && root.status.errors.length ? root.status.errors.join("\n") : root.status.message)
+            visible: root.effectiveState === "error" || root.effectiveState === "paused"
+            text: root.effectiveState === "paused" ? root.status.message : (root.status.errors && root.status.errors.length ? root.status.errors.join("\n") : root.status.message)
             color: Kirigami.Theme.negativeTextColor
             wrapMode: Text.Wrap
             Layout.fillWidth: true
         }
         Item { Layout.fillHeight: true }
         PlasmaComponents.Button {
-            text: root.effectiveState === "syncing" ? i18n("Stop sync") : i18n("Sync now")
+            text: root.effectiveState === "syncing" ? i18n("Stop sync") : root.effectiveState === "paused" ? i18n("Resume sync") : i18n("Sync now")
             icon.name: root.effectiveState === "syncing" ? "process-stop" : "view-refresh"
             onClicked: root.effectiveState === "syncing" ? root.stopSync() : root.syncNow()
         }

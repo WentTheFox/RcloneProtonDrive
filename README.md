@@ -150,7 +150,23 @@ widget that shows sync status and errors.
 2. Run `Linux/install.sh`. It installs the units and the status helper, creates
    `~/.config/rclone-protondrive/rc.env` (web-UI login, mode 600) if missing,
    enables the timer, and installs the plasmoid.
-3. Add the **Proton Drive Sync** widget to a panel.
+3. Edit `~/.config/rclone-protondrive/config.env` (local folder, remote name,
+   `MODE`, required mount). It defaults to `bisync` into `/mnt/d/ProtonDrive`.
+4. Add the **Proton Drive Sync** widget to a panel.
+
+The timer runs `rclone-protondrive-sync`, which reads that config. Like the
+Windows service it supports `MODE=download` (one-way, never deletes locally,
+overwritten files go to `<LOCAL_PATH>.rclone-backup` with a timestamp suffix) and
+`MODE=bisync` (newer wins on conflict, local overwrites/deletes backed up to the
+same folder, automatic `--resync` on the first run). Both skip files matched by
+`~/.config/rclone-protondrive/bisync-filters.txt` (installed from
+`Linux/bisync-filters.txt`; re-running `install.sh` overwrites it). Failures raise a desktop notification (the first, then every 4th in a
+row); the widget tooltip shows the failure count, and "last successful sync"
+survives reboots. On an expired Proton token the sync refreshes it and retries once. Failures
+are translated to plain English, and unrecoverable ones (case-only duplicate
+filenames, too many deletes) **pause** syncing until you choose **Resume sync**
+in the widget (`~/.local/state/rclone-protondrive/sync-paused.json`). Not ported:
+the always-on rclone web UI — on Linux it is only up while a sync is running.
 
 The sync unit calls `rclone-protondrive-status` before and after each run, which
 writes `$XDG_RUNTIME_DIR/rclone-protondrive/status.json`. The widget blocks on an
