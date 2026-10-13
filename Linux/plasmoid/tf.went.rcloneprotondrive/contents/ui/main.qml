@@ -100,7 +100,8 @@ PlasmoidItem {
 
     function ago(ts) {
         if (!ts) return i18n("never")
-        const s = Math.max(0, Math.floor(Date.now() / 1000 - ts))
+        // Reading root.now makes bindings that call ago() re-evaluate when it is refreshed
+        const s = Math.max(0, Math.floor(root.now / 1000 - ts))
         if (s < 60) return i18n("just now")
         if (s < 3600) return i18n("%1 min ago", Math.floor(s / 60))
         if (s < 86400) return i18n("%1 h ago", Math.floor(s / 3600))
@@ -137,7 +138,7 @@ PlasmoidItem {
     Component.onCompleted: connectQuery()
 
     // Cheap safety net for the instant between a waiter exiting and being re-armed
-    onExpandedChanged: { if (expanded) connectQuery(); else stats = null }
+    onExpandedChanged: { if (expanded) { now = Date.now(); connectQuery() } else stats = null }
 
     // The marker tells the status helper this was a user stop, not a failure
     function stopSync() {
