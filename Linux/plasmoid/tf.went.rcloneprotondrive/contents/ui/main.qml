@@ -181,11 +181,18 @@ PlasmoidItem {
         }
     }
 
-    fullRepresentation: ColumnLayout {
+    fullRepresentation: Item {
+        // Layout.margins has no effect on a popup's root item, so the padding is an anchored inset
+        readonly property int pad: Kirigami.Units.gridUnit
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 18 + 2 * pad
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 20 + 2 * pad
+        implicitHeight: content.implicitHeight + 2 * pad
+
+        ColumnLayout {
+        id: content
+        anchors.fill: parent
+        anchors.margins: parent.pad
         // Sized by its content (no stretchy gap above the button); one spacing between groups
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 18
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 20
-        Layout.margins: Kirigami.Units.largeSpacing
         spacing: Kirigami.Units.largeSpacing
 
         RowLayout {
@@ -256,5 +263,6 @@ PlasmoidItem {
         }
         // Absorbs spare height so extra window size doesn't spread the content apart
         Item { Layout.fillHeight: true }
+        }
     }
 }
