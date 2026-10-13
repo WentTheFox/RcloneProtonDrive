@@ -172,9 +172,11 @@ PlasmoidItem {
     }
 
     fullRepresentation: ColumnLayout {
+        // Sized by its content (no stretchy gap above the button); one spacing between groups
         Layout.minimumWidth: Kirigami.Units.gridUnit * 18
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 8
-        spacing: Kirigami.Units.smallSpacing
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+        Layout.margins: Kirigami.Units.largeSpacing
+        spacing: Kirigami.Units.largeSpacing
 
         RowLayout {
             spacing: Kirigami.Units.largeSpacing
@@ -194,7 +196,7 @@ PlasmoidItem {
         ColumnLayout {
             visible: root.effectiveState === "syncing" && root.stats !== null
             Layout.fillWidth: true
-            spacing: 0
+            spacing: Kirigami.Units.smallSpacing
             PlasmaComponents.ProgressBar {
                 Layout.fillWidth: true
                 visible: (root.stats && root.stats.totalBytes > 0) || root.fileFraction >= 0
@@ -236,11 +238,13 @@ PlasmoidItem {
             wrapMode: Text.Wrap
             Layout.fillWidth: true
         }
-        Item { Layout.fillHeight: true }
         PlasmaComponents.Button {
+            Layout.alignment: Qt.AlignRight
             text: root.effectiveState === "syncing" ? i18n("Stop sync") : root.effectiveState === "paused" ? i18n("Resume sync") : i18n("Sync now")
             icon.name: root.effectiveState === "syncing" ? "process-stop" : "view-refresh"
             onClicked: root.effectiveState === "syncing" ? root.stopSync() : root.syncNow()
         }
+        // Absorbs spare height so extra window size doesn't spread the content apart
+        Item { Layout.fillHeight: true }
     }
 }

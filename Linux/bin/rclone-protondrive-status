@@ -130,7 +130,8 @@ def save_run(checks, seconds):
 
 
 def expected_checks():
-    """Median of recent runs; before there is any history, the size of bisync's last listing."""
+    """Median of recent runs; before there is any history, a guess from bisync's last listing
+    (one line per file, but bisync checks both sides, hence the doubling)."""
     known = [r["checks"] for r in load_history() if r.get("checks", 0) > 0]
     if known:
         return int(statistics.median(known))
@@ -138,7 +139,7 @@ def expected_checks():
     if lists:
         try:
             with open(lists[0], errors="replace") as f:
-                return sum(1 for _ in f)
+                return 2 * sum(1 for _ in f)
         except OSError:
             pass
     return None
