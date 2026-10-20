@@ -114,6 +114,9 @@ $global:RcloneTrayIconSyncing = $iconSyncing
 $global:RcloneTrayRoot = $Root
 $global:RcloneSyncing = $false
 $global:RcloneSyncSince = $null
+# True from the service's "first run: --resync" log line until that run ends. A resync lists and
+# reconciles both sides from scratch, so its check count says nothing about a normal run.
+$global:RcloneResync = $false
 $global:RcloneLastOk = $null
 $global:RcloneLastError = ''
 $global:RcloneStats = $null
@@ -169,9 +172,10 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
         'ok' {
             if ($global:RcloneJobGroup -and ((Get-Date) - $when).TotalSeconds -lt 30) {
                 $s = Get-RcloneStatsNow
-                if ($s -and $s.checks -gt 0) { Save-RcloneRun $s.checks (($when - $global:RcloneSyncSince).TotalSeconds) }
+                if ($s -and $s.checks -gt 0 -and -not $global:RcloneResync) { Save-RcloneRun $s.checks (($when - $global:RcloneSyncSince).TotalSeconds) }
             }
             $global:RcloneJobGroup = $null
+            $global:RcloneResync = $false
             $global:RcloneLastOk = $when
             $global:RcloneLastError = ''
             $global:consecutiveFailures = 0
@@ -181,6 +185,7 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
         }
         'fail' {
             $global:RcloneJobGroup = $null
+            $global:RcloneResync = $false
             if ($global:RcloneStopRequested) {  # user stopped it: not an error
                 $global:RcloneStopRequested = $false
                 Set-RcloneCurrentIcon
@@ -218,7 +223,8 @@ function global:Read-RcloneTrayNewLines {
         foreach ($line in ($text -split "`r?`n")) {
             $when = Get-Date
             if ($line -match '^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)') { $when = [datetime]::Parse($Matches[1]) }
-            if ($line -match 'sync FAILED:\s*(.*)$') { Update-RcloneTrayStatus 'fail' $Matches[1] $when }
+            if ($line -match 'first run: --resync') { $global:RcloneResync = $true }
+            elseif ($line -match 'sync FAILED:\s*(.*)$') { Update-RcloneTrayStatus 'fail' $Matches[1] $when }
             elseif ($line -match 'sync finished') { Update-RcloneTrayStatus 'ok' '' $when }
             elseif ($line -match 'sync starting') { Update-RcloneTrayStatus 'start' '' $when }
         }
@@ -565,11 +571,12 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $paused = (-not $syncing) -and $global:RcloneSyncPaused
     $failed = (-not $syncing) -and (-not $paused) -and $global:RcloneLastError
     $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($paused -or $failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
-    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { 'Syncing...' } elseif ($paused) { 'Sync paused' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
+    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { $(if ($global:RcloneResync) { 'Full resync...' } else { 'Syncing...' }) } elseif ($paused) { 'Sync paused' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
     $c.Since.Visible = $syncing
     if ($requested) { $c.Since.Text = 'Waiting for the service to start the run' }
     elseif ($syncing) {
         $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)"
+        if ($global:RcloneResync) { $c.Since.Text += '; rebuilding the sync baseline, no progress estimate' }
         if (Test-Path "$($global:RcloneTrayRoot)\sync-now") { $c.Since.Text += '; next run queued' }
     }
     $s = $global:RcloneStats
@@ -577,7 +584,7 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $bytesMode = $showStats -and $s.totalBytes -gt 0
     # Files-based progress: this run's checked count vs. the median of previous runs
     $done = if ($showStats) { Get-RcloneRunChecks } else { $null }
-    $expected = if ($showStats) { Get-RcloneExpectedChecks } else { $null }
+    $expected = if ($showStats -and -not $global:RcloneResync) { Get-RcloneExpectedChecks } else { $null }
     $frac = if ($null -ne $done -and $expected) { [Math]::Min(0.99, $done / [Math]::Max(1.0, $expected)) } else { $null }
     $showBar = $bytesMode -or ($null -ne $frac)
     $c.BarTrack.Visible = $showBar
