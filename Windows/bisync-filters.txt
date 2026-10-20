@@ -2,3 +2,7 @@
 - Thumbs.db
 - ~$*
 - *.tmp
+- .stfolder/**
+- .stversions/**
+- .stfolder/
+- .stversions/
