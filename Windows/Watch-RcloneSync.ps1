@@ -449,11 +449,17 @@ function global:Update-RcloneSyncRequested {
     }
     Update-RcloneTrayPopup
 }
-function global:Invoke-Rc([string]$path, $body = @{}) {
+# rclone answers 'application/json' with no charset, so Invoke-RestMethod on Windows PowerShell 5.1
+# decodes the body as Latin-1 and accented file names come out mangled. Decode the bytes as UTF-8 here.
+function global:Invoke-RcJson([string]$path, $body, [int]$timeout) {
     $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
     $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5572/$path" -Headers @{ Authorization = $basic } `
-        -ContentType 'application/json' -Body ($body | ConvertTo-Json) -TimeoutSec 3
+    $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:5572/$path" -Headers @{ Authorization = $basic } `
+        -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json))) -TimeoutSec $timeout
+    [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
+}
+function global:Invoke-Rc([string]$path, $body = @{}) {
+    Invoke-RcJson $path $body 3
 }
 # Ground truth for "is a sync running": rclone's own job list. Every rc call (including this
 # one) is a job, but those finish instantly, so only jobs running for more than a couple of
@@ -515,10 +521,7 @@ $global:RcloneJobGroup = $null
 function global:Get-RcloneStatsNow {
     if (-not $global:RcloneJobGroup) { return $null }
     try {
-        $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
-        $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
-        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:5572/core/stats' -Headers @{ Authorization = $basic } `
-            -ContentType 'application/json' -Body (@{ group = $global:RcloneJobGroup } | ConvertTo-Json) -TimeoutSec 2
+        Invoke-RcJson 'core/stats' @{ group = $global:RcloneJobGroup } 2
     } catch { $null }  # keep the last snapshot rather than flicker
 }
 function global:Get-RcloneStats {
