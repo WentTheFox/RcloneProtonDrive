@@ -69,6 +69,7 @@ bisync)
           --backup-dir2 "$LOCAL_PATH.rclone-backup")
     if ! compgen -G "${XDG_CACHE_HOME:-$HOME/.cache}/rclone/bisync/*.lst" >/dev/null; then
         echo 'first run: --resync (newer wins)'
+        "${0%/*}/rclone-protondrive-status" resync || true
         args+=(--resync --resync-mode newer)
     fi
     run rclone bisync "$REMOTE" "$LOCAL_PATH" "${common[@]}" "${args[@]}"

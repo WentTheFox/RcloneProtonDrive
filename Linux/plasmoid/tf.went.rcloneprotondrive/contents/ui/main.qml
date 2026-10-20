@@ -81,7 +81,7 @@ PlasmoidItem {
     }
     readonly property string stateText: {
         switch (effectiveState) {
-        case "syncing": return i18n("Syncing…")
+        case "syncing": return status.resync ? i18n("Full resync…") : i18n("Syncing…")
         case "idle": return i18n("Up to date")
         case "error": return i18n("Sync failed")
         case "paused": return i18n("Sync paused")
@@ -208,7 +208,7 @@ PlasmoidItem {
         }
         PlasmaComponents.Label {
             visible: root.effectiveState === "syncing" && root.status.state === "syncing"
-            text: i18n("Started %1", root.ago(root.status.since))
+            text: root.status.resync ? i18n("Started %1; rebuilding the sync baseline, no progress estimate", root.ago(root.status.since)) : i18n("Started %1", root.ago(root.status.since))
             opacity: 0.7
         }
         ColumnLayout {

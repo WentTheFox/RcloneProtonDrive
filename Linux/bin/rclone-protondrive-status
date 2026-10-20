@@ -2,6 +2,7 @@
 """Writes the sync status file the plasmoid watches.
 
 Usage: rclone-protondrive-status syncing
+       rclone-protondrive-status resync     (the sync script is doing a full --resync: no progress estimate)
        rclone-protondrive-status finished   (reads SERVICE_RESULT/EXIT_STATUS from systemd)
 
 Besides the status file it keeps a small persistent history of how many files each
@@ -164,6 +165,10 @@ def main():
             pass
         write({"state": "syncing", "since": now, "lastOk": prev.get("lastOk") or last_ok_persisted(), "lastResult": prev.get("lastResult"),
                "errors": [], "message": "", "failures": prev.get("failures", 0), "expected": expected_checks()})
+    elif mode == "resync":
+        # A resync rebuilds the baseline from scratch, so past runs say nothing about its size
+        if prev.get("state") == "syncing":
+            write({**prev, "resync": True, "expected": None})
     elif mode == "finished":
         result = os.environ.get("SERVICE_RESULT", "unknown")
         code = os.environ.get("EXIT_STATUS", "")
@@ -185,7 +190,7 @@ def main():
                    "errors": [], "message": "", "failures": prev.get("failures", 0)})
         elif result == "success":
             checks = checked_files(journal_lines(2000))
-            if checks:
+            if checks and not prev.get("resync"):
                 save_run(checks, now - prev.get("since", now))
             save_last_ok(now)
             write({"state": "idle", "since": now, "lastOk": now, "lastResult": "success", "errors": [], "message": "",
