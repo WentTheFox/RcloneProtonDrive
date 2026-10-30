@@ -17,9 +17,14 @@ if (-not $acquired) { exit }
 # script blocks can't handle safely (Register-ObjectEvent actions race with shutdown and throw
 # PipelineStoppedException), so tiny C# shims marshal them onto the UI thread instead.
 # (Compiled before FreeConsole: Add-Type needs a console handle.)
-Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @"
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Net.Http -TypeDefinition @"
 using System;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 public class WatcherBridge {
@@ -31,6 +36,38 @@ public class WatcherBridge {
     }
     static void Post(Control ui, Action cb) {
         try { if (ui.IsHandleCreated && !ui.IsDisposed) ui.BeginInvoke(cb); } catch (Exception) { }
+    }
+}
+// rc calls must never run on the UI thread (a stopped or hung service would freeze the popup and
+// tray), so this does the HTTP on the thread pool and marshals the result back onto the UI thread.
+// done(body, error): error is null on success, "timeout", "down:<message>" when nothing is
+// listening, or "http:<status>".
+public class RcClient {
+    static readonly HttpClient http = CreateClient();
+    static HttpClient CreateClient() {
+        var c = new HttpClient(new HttpClientHandler { UseProxy = false });
+        c.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
+        return c;
+    }
+    public static void Post(Control ui, string url, string auth, string json, int timeoutMs, Action<string, string> done) {
+        Task.Run(async () => {
+            string res = null, err = null;
+            try {
+                using (var cts = new CancellationTokenSource(timeoutMs))
+                using (var req = new HttpRequestMessage(HttpMethod.Post, url)) {
+                    req.Headers.TryAddWithoutValidation("Authorization", auth);
+                    req.Content = new ByteArrayContent(Encoding.UTF8.GetBytes(json));
+                    req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                    using (var r = await http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token).ConfigureAwait(false)) {
+                        var bytes = await r.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                        if (r.IsSuccessStatusCode) res = Encoding.UTF8.GetString(bytes);
+                        else err = "http:" + (int)r.StatusCode;
+                    }
+                }
+            } catch (OperationCanceledException) { err = "timeout"; }
+            catch (Exception e) { err = "down:" + e.Message; }
+            try { if (ui.IsHandleCreated && !ui.IsDisposed) ui.BeginInvoke(done, res, err); } catch (Exception) { }
+        });
     }
 }
 public class ThemeWatcher {
@@ -81,6 +118,7 @@ $iconOk      = New-PngIcon "synced-$tbSuffix"
 $iconBad     = New-PngIcon "error-$tbSuffix"
 $iconSyncing = New-PngIcon "syncing-$tbSuffix"
 $iconIdle    = New-PngIcon "idle-$tbSuffix"
+$iconWarn    = New-PngIcon "warning-$tbSuffix"
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Icon = $iconIdle
 $notify.Text = 'Proton Drive sync: starting up'
@@ -101,6 +139,7 @@ $itemSync = $menu.Items.Add('Sync now')
 $itemSync.Add_Click({ Request-RcloneSync })
 $itemResume = $menu.Items.Add('Resume sync')
 $itemResume.Add_Click({ Resume-RcloneSync })
+$menu.Add_Opening({ $itemOpen.Enabled = $itemSync.Enabled = $itemResume.Enabled = -not $global:RcloneRcDown })
 $menu.Items.Add('-') | Out-Null
 $itemRestart = $menu.Items.Add('Restart tray icon')
 $itemRestart.Add_Click({ Restart-RcloneTray })
@@ -123,6 +162,7 @@ $global:RcloneStats = $null
 $global:RcloneTrayIconOk = $iconOk
 $global:RcloneTrayIconBad = $iconBad
 $global:RcloneTrayIconIdle = $iconIdle
+$global:RcloneTrayIconWarn = $iconWarn
 $global:RcloneTrayLogFile = $LogFile
 $global:consecutiveFailures = 0
 $global:lastOffset = 0
@@ -171,8 +211,11 @@ function global:Update-RcloneTrayStatus([string]$state, [string]$detail, $when =
         }
         'ok' {
             if ($global:RcloneJobGroup -and ((Get-Date) - $when).TotalSeconds -lt 30) {
-                $s = Get-RcloneStatsNow
-                if ($s -and $s.checks -gt 0 -and -not $global:RcloneResync) { Save-RcloneRun $s.checks (($when - $global:RcloneSyncSince).TotalSeconds) }
+                $resync = $global:RcloneResync; $since = $global:RcloneSyncSince
+                Invoke-RcAsync 'core/stats' @{ group = $global:RcloneJobGroup } 2000 {
+                    param($s)
+                    if ($s -and $s.checks -gt 0 -and -not $resync) { Save-RcloneRun $s.checks (($when - $since).TotalSeconds) }
+                }.GetNewClosure()
             }
             $global:RcloneJobGroup = $null
             $global:RcloneResync = $false
@@ -223,11 +266,13 @@ function global:Read-RcloneTrayNewLines {
         foreach ($line in ($text -split "`r?`n")) {
             $when = Get-Date
             if ($line -match '^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)') { $when = [datetime]::Parse($Matches[1]) }
-            if ($line -match 'first run: --resync') { $global:RcloneResync = $true }
+            if ($line -match 'rcd started') { $rcdStarted = $true }
+            elseif ($line -match 'first run: --resync') { $global:RcloneResync = $true }
             elseif ($line -match 'sync FAILED:\s*(.*)$') { Update-RcloneTrayStatus 'fail' $Matches[1] $when }
             elseif ($line -match 'sync finished') { Update-RcloneTrayStatus 'ok' '' $when }
             elseif ($line -match 'sync starting') { Update-RcloneTrayStatus 'start' '' $when }
         }
+        if ($rcdStarted) { Sync-RcloneStateFromRc -Force }  # the service is (back) up: drop any "not running" state
     } catch { }
     Update-RcloneTrayPauseState
 }
@@ -358,7 +403,7 @@ $lblTitle.Text = 'Proton Drive sync'
 $lblState = New-PopupLabel $fontTitle $cFg 0 0 $titleCol
 $global:PopupImages = @{}
 $appSuffix = if ($light) { 'black' } else { 'white' }
-foreach ($n in 'synced', 'syncing', 'error', 'idle') { $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$Root\icons\$n-$appSuffix.png") }
+foreach ($n in 'synced', 'syncing', 'error', 'idle', 'warning') { $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$Root\icons\$n-$appSuffix.png") }
 $lblSince = New-PopupLabel $fontSmall $cDim 0 16
 $barTrack = New-Object System.Windows.Forms.Panel
 $barTrack.Size = New-Object System.Drawing.Size $contentWidth, 4
@@ -397,6 +442,7 @@ $global:PopupCtl = @{ Pic = $picState; State = $lblState; Since = $lblSince; Bar
 function global:Set-RcloneCurrentIcon {
     $g = $global:RcloneTrayNotify
     $g.Icon = if ($global:RcloneSyncing) { $global:RcloneTrayIconSyncing }
+              elseif ($global:RcloneRcDown) { $global:RcloneTrayIconWarn }
               elseif ($global:RcloneSyncPaused -or $global:consecutiveFailures -gt 0) { $global:RcloneTrayIconBad }
               elseif ($global:RcloneLastOk) { $global:RcloneTrayIconOk }
               else { $global:RcloneTrayIconIdle }
@@ -420,10 +466,11 @@ function global:Update-RcloneTheme {
     $global:RcloneTrayIconBad = New-PngIcon "error-$sfx"
     $global:RcloneTrayIconSyncing = New-PngIcon "syncing-$sfx"
     $global:RcloneTrayIconIdle = New-PngIcon "idle-$sfx"
+    $global:RcloneTrayIconWarn = New-PngIcon "warning-$sfx"
     Set-RcloneCurrentIcon
 
     $appSfx = if ($pal.Light) { 'black' } else { 'white' }
-    foreach ($n in 'synced', 'syncing', 'error', 'idle') {
+    foreach ($n in 'synced', 'syncing', 'error', 'idle', 'warning') {
         $old = $global:PopupImages[$n]
         $global:PopupImages[$n] = [System.Drawing.Image]::FromFile("$($global:RcloneTrayRoot)\icons\$n-$appSfx.png")
         $global:PopupCtl.Pic.Image = $null; if ($old) { $old.Dispose() }
@@ -455,62 +502,119 @@ function global:Update-RcloneSyncRequested {
     }
     Update-RcloneTrayPopup
 }
-# rclone answers 'application/json' with no charset, so Invoke-RestMethod on Windows PowerShell 5.1
-# decodes the body as Latin-1 and accented file names come out mangled. Decode the bytes as UTF-8 here.
-function global:Invoke-RcJson([string]$path, $body, [int]$timeout) {
-    $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
-    $basic = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
-    $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:5572/$path" -Headers @{ Authorization = $basic } `
-        -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json))) -TimeoutSec $timeout
-    [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
+# Every rc call is asynchronous (RcClient runs it on the thread pool and calls back on the UI
+# thread), so a stopped, starting or hung service can never freeze the tray. rclone answers
+# 'application/json' with no charset, so RcClient decodes the bytes as UTF-8 itself (otherwise
+# accented file names come out mangled). After a failed call further calls are skipped for a few
+# seconds (unless forced by a click or the popup opening) instead of piling up behind timeouts.
+$global:RcloneRcDown = $false        # nothing is listening on the rc port: the service isn't running
+$global:RcloneRcDownUntil = [datetime]::MinValue
+$global:RcloneRcAuth = $null
+$global:RcloneRcBusy = $false        # a job-list or stats request is already in flight
+function global:Set-RcloneRcDown([bool]$down) {
+    if ($global:RcloneRcDown -eq $down) { return }
+    $global:RcloneRcDown = $down
+    if ($down) {
+        # rcd hosts the runs, so nothing can still be running if it is gone
+        $global:RcloneSyncing = $false
+        $global:RcloneJobGroup = $null
+        $global:RcloneStats = $null
+    }
+    Set-RcloneCurrentIcon
+    if ($down -and -not $global:RcloneSyncPaused) { $global:RcloneTrayNotify.Text = 'Proton Drive sync: service not running' }
+    Update-RcloneTrayPopup
 }
-function global:Invoke-Rc([string]$path, $body = @{}) {
-    Invoke-RcJson $path $body 3
+function global:Invoke-RcAsync([string]$path, $body, [int]$timeoutMs, [scriptblock]$onOk, [scriptblock]$onFail, [switch]$Force) {
+    if (-not $Force -and (Get-Date) -lt $global:RcloneRcDownUntil) { if ($onFail) { & $onFail 'backoff' }; return }
+    if (-not $global:RcloneRcAuth) {
+        try {
+            $auth = Get-Content "$($global:RcloneTrayRoot)\rc-auth.txt"
+            $global:RcloneRcAuth = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($auth[0]):$($auth[1])"))
+        } catch { if ($onFail) { & $onFail 'auth' }; return }
+    }
+    $cb = {
+        param($res, $err)
+        try {
+            if ($err) {
+                if ($err -like 'down:*' -or $err -eq 'timeout') { $global:RcloneRcDownUntil = (Get-Date).AddSeconds(5) }
+                Set-RcloneRcDown ($err -like 'down:*')
+                if ($onFail) { & $onFail $err }
+            } else {
+                $global:RcloneRcDownUntil = [datetime]::MinValue
+                Set-RcloneRcDown $false
+                if ($onOk) { & $onOk ($res | ConvertFrom-Json) }
+            }
+        } catch { }
+    }.GetNewClosure()
+    [RcClient]::Post($global:RcloneTrayPopup, "http://127.0.0.1:5572/$path", $global:RcloneRcAuth, ($body | ConvertTo-Json -Compress), $timeoutMs, [Action[string, string]]$cb)
 }
 # Ground truth for "is a sync running": rclone's own job list. Every rc call (including this
 # one) is a job, but those finish instantly, so only jobs running for more than a couple of
 # seconds count. This does not depend on log-file change events, which Windows withholds
-# while the service keeps the log open. Returns @{ Id; Start } per running job.
-function global:Get-RcloneRunningJobs {
-    try {
-        $out = @()
-        foreach ($id in @((Invoke-Rc 'job/list').runningIds)) {
-            $st = Invoke-Rc 'job/status' @{ jobid = $id }
+# while the service keeps the log open. Calls $then with an array of @{ Id; Start } per running
+# job (empty when none are running or rc can't be reached).
+function global:Get-RcloneRunningJobsAsync([scriptblock]$then, [switch]$Force) {
+    $none = { & $then @() }.GetNewClosure()
+    Invoke-RcAsync 'job/list' @{} 3000 {
+        param($list)
+        $ids = @($list.runningIds)
+        if (-not $ids.Count) { & $none; return }
+        # GetNewClosure only captures the *local* scope, so copy what the inner callbacks need
+        $next = $then; $force = $Force
+        $st = @{ Left = $ids.Count; Jobs = @() }
+        $step = {
+            param($status)
             # duration stays 0 until a job finishes, so age comes from its start time
-            $start = [datetime]$st.startTime
-            if (-not $st.finished -and ((Get-Date) - $start).TotalSeconds -ge 2) { $out += @{ Id = $id; Start = $start } }
-        }
-        , $out
-    } catch { , @() }
+            if ($status -and -not $status.finished) {
+                $start = [datetime]$status.startTime
+                if (((Get-Date) - $start).TotalSeconds -ge 2) { $st.Jobs += @{ Id = $status.id; Start = $start } }
+            }
+            $st.Left--
+            if ($st.Left -eq 0) { & $next @($st.Jobs) }
+        }.GetNewClosure()
+        $failed = { & $step $null }.GetNewClosure()
+        foreach ($id in $ids) { Invoke-RcAsync 'job/status' @{ jobid = $id } 3000 $step $failed -Force:$force }
+    }.GetNewClosure() $none -Force:$Force
 }
 # Reconcile the tray's idea of the state with rclone's: log events can be late or missed.
-function global:Sync-RcloneStateFromRc {
-    $jobs = Get-RcloneRunningJobs
-    if ($jobs.Count -and -not $global:RcloneSyncing) {
-        $global:RcloneJobGroup = "job/$($jobs[0].Id)"
-        Update-RcloneTrayStatus 'start' '' $jobs[0].Start
-    } elseif (-not $jobs.Count -and $global:RcloneSyncing) {
-        Read-RcloneTrayNewLines  # the log knows how it ended
-    }
-    Update-RcloneTrayPopup
-    , $jobs
+# $then (optional) receives the running jobs once known.
+function global:Sync-RcloneStateFromRc([scriptblock]$then, [switch]$Force) {
+    if ($global:RcloneRcBusy -and -not $then) { return }
+    $global:RcloneRcBusy = $true
+    Get-RcloneRunningJobsAsync -Force:$Force -then {
+        param($jobs)
+        $global:RcloneRcBusy = $false
+        if ($jobs.Count -and -not $global:RcloneSyncing) {
+            $global:RcloneJobGroup = "job/$($jobs[0].Id)"
+            Update-RcloneTrayStatus 'start' '' $jobs[0].Start
+        } elseif (-not $jobs.Count -and $global:RcloneSyncing) {
+            Read-RcloneTrayNewLines  # the log knows how it ended
+        }
+        Update-RcloneTrayPopup
+        if ($then) { & $then $jobs }
+    }.GetNewClosure()
 }
 function global:Request-RcloneSync {
     if ($global:RcloneSyncRequested) { return }
     # Never queue a run behind one that is already going: check rclone first
-    if ((Sync-RcloneStateFromRc).Count -or $global:RcloneSyncing) { return }
-    try { New-Item -ItemType File -Force "$($global:RcloneTrayRoot)\sync-now" | Out-Null } catch {
-        $global:RcloneTrayNotify.ShowBalloonTip(5000, 'Proton Drive sync', "Could not request a sync: $($_.Exception.Message)", [System.Windows.Forms.ToolTipIcon]::Error)
-        return
+    Sync-RcloneStateFromRc -Force -then {
+        param($jobs)
+        if ($jobs.Count -or $global:RcloneSyncing -or $global:RcloneSyncRequested -or $global:RcloneRcDown) { return }
+        try { New-Item -ItemType File -Force "$($global:RcloneTrayRoot)\sync-now" | Out-Null } catch {
+            $global:RcloneTrayNotify.ShowBalloonTip(5000, 'Proton Drive sync', "Could not request a sync: $($_.Exception.Message)", [System.Windows.Forms.ToolTipIcon]::Error)
+            return
+        }
+        Update-RcloneSyncRequested
     }
-    Update-RcloneSyncRequested
 }
 # Stop: drop any queued trigger (or the service would start the next run right away) and cancel the running job(s).
 function global:Stop-RcloneSync {
     [System.IO.File]::Delete("$($global:RcloneTrayRoot)\sync-now")
-    $jobs = Get-RcloneRunningJobs
-    if ($jobs.Count) { $global:RcloneStopRequested = $true }
-    foreach ($j in $jobs) { try { Invoke-Rc 'job/stop' @{ jobid = $j.Id } | Out-Null } catch { } }
+    Get-RcloneRunningJobsAsync -Force -then {
+        param($jobs)
+        if ($jobs.Count) { $global:RcloneStopRequested = $true }
+        foreach ($j in $jobs) { Invoke-RcAsync 'job/stop' @{ jobid = $j.Id } 3000 $null $null -Force }
+    }
     Update-RcloneSyncRequested
 }
 function global:Invoke-RcloneSyncButton {
@@ -524,19 +628,21 @@ $global:RcloneSyncRequested = Test-Path "$Root\sync-now"
 # group ("job/<id>"), so asking for the running job's group gives exact per-run numbers with
 # no baseline bookkeeping (and works however late the tray notices the run).
 $global:RcloneJobGroup = $null
-function global:Get-RcloneStatsNow {
-    if (-not $global:RcloneJobGroup) { return $null }
-    try {
-        Invoke-RcJson 'core/stats' @{ group = $global:RcloneJobGroup } 2
-    } catch { $null }  # keep the last snapshot rather than flicker
-}
 function global:Get-RcloneStats {
+    if ($global:RcloneRcBusy) { return }
     if (-not $global:RcloneJobGroup) {
-        $j = Get-RcloneRunningJobs
-        if ($j.Count) { $global:RcloneJobGroup = "job/$($j[0].Id)" }
+        Sync-RcloneStateFromRc  # finds the running job and sets the group
+        return
     }
-    $s = Get-RcloneStatsNow
-    if ($s) { $global:RcloneStats = $s }
+    $group = $global:RcloneJobGroup
+    $global:RcloneRcBusy = $true
+    $release = { $global:RcloneRcBusy = $false }.GetNewClosure()
+    Invoke-RcAsync 'core/stats' @{ group = $group } 2000 {
+        param($s)
+        & $release
+        if ($s -and $global:RcloneJobGroup -eq $group) { $global:RcloneStats = $s }  # else keep the last snapshot rather than flicker
+        Update-RcloneTrayPopup
+    }.GetNewClosure() $release
 }
 
 # --- Rough progress across runs ----------------------------------------------
@@ -570,10 +676,12 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $syncing = $global:RcloneSyncing -or $requested
     $paused = (-not $syncing) -and $global:RcloneSyncPaused
     $failed = (-not $syncing) -and (-not $paused) -and $global:RcloneLastError
-    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($paused -or $failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
-    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { $(if ($global:RcloneResync) { 'Full resync...' } else { 'Syncing...' }) } elseif ($paused) { 'Sync paused' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
-    $c.Since.Visible = $syncing
-    if ($requested) { $c.Since.Text = 'Waiting for the service to start the run' }
+    $down = (-not $syncing) -and $global:RcloneRcDown
+    $c.Pic.Image = $global:PopupImages[$(if ($syncing) { 'syncing' } elseif ($down) { 'warning' } elseif ($paused -or $failed) { 'error' } elseif ($global:RcloneLastOk) { 'synced' } else { 'idle' })]
+    $c.State.Text = if ($requested) { 'Sync requested...' } elseif ($syncing) { $(if ($global:RcloneResync) { 'Full resync...' } else { 'Syncing...' }) } elseif ($down) { 'Service not running' } elseif ($paused) { 'Sync paused' } elseif ($failed) { 'Sync failed' } elseif ($global:RcloneLastOk) { 'Up to date' } else { 'No sync run yet' }
+    $c.Since.Visible = $syncing -or $down
+    if ($down) { $c.Since.Text = 'Start the rclone-proton service to resume syncing' }
+    elseif ($requested) { $c.Since.Text = 'Waiting for the service to start the run' }
     elseif ($syncing) {
         $c.Since.Text = "Started $(Format-Ago $global:RcloneSyncSince)"
         if ($global:RcloneResync) { $c.Since.Text += '; rebuilding the sync baseline, no progress estimate' }
@@ -607,7 +715,8 @@ function global:Update-RcloneTrayPopup([switch]$Force) {
     $c.Error.Visible = [bool]$failed -or $paused
     $c.Error.Text = if ($paused) { $global:RcloneSyncPauseGuidance } else { $global:RcloneLastError }
     $c.Sync.Text = if ($requested) { 'Cancel request' } elseif ($syncing) { 'Stop sync' } elseif ($paused) { 'Resume sync' } else { 'Sync now' }
-    $c.Sync.BackColor = if ($syncing) { $global:PopupTrack } else { $global:PopupAccent }
+    $c.Sync.Enabled = -not $down  # nothing could start a run: the service isn't there to pick the request up
+    $c.Sync.BackColor = if ($syncing -or $down) { $global:PopupTrack } else { $global:PopupAccent }
     $c.Sync.ForeColor = if ($syncing) { $global:PopupFg } else { [System.Drawing.Color]::White }
     $f.Timer.Enabled = $syncing -and $f.Visible
 }
@@ -632,7 +741,7 @@ function global:Toggle-RcloneTrayPopup {
     # Lay out with the real content *before* the first Show: otherwise the first opening
     # is sized for every (still visible) control and only shrinks afterwards.
     Read-RcloneTrayNewLines            # the log watcher can lag while the service holds the file open
-    Sync-RcloneStateFromRc | Out-Null  # and ask rclone itself what is running
+    Sync-RcloneStateFromRc -Force      # and ask rclone itself what is running (the answer arrives asynchronously)
     Update-RcloneTrayPopup -Force
     $f.PerformLayout()
     Set-PopupPosition

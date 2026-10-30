@@ -16,6 +16,7 @@ $icons = @{
     synced  = @('cloud-check', '#2eb85c')
     syncing = @('cloud-sync',  '#3b82f6')
     error   = @('cloud-alert', '#e5484d')
+    warning = @('cloud-alert', '#f5a524')
     idle    = @('cloud',       $null)
 }
 $outlines = @{ white = '#ffffff'; black = '#1a1a1a' }
