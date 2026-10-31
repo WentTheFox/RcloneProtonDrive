@@ -182,6 +182,13 @@ helper keeps the counts of the last five successful runs in
 `~/.local/state/rclone-protondrive/history.json` and the widget compares against their
 median (before any history exists it uses the size of bisync's last listing).
 
+**Uninstalling:** run `Linux/uninstall.sh`. It stops and removes the timer and
+units, the helper scripts and the plasmoid, but keeps
+`~/.config/rclone-protondrive` and `~/.local/state/rclone-protondrive`; pass
+`--purge` to delete those too. It never touches your synced folder, your rclone
+remote or rclone's bisync cache. Remove the widget from your panel yourself
+(right-click > Remove), otherwise it stays on screen as a stale widget.
+
 **Updating the widget:** re-running `install.sh` upgrades the files but doesn't
 touch the running desktop. Plasma only loads new widget code when the widget is
 (re)loaded, so either remove and re-add it, or restart Plasma
